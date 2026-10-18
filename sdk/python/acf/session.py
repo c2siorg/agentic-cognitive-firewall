@@ -63,7 +63,7 @@ class Session:
         tool_constraints: dict[str, dict[str, dict[str, Any]]] | None = None,
     ) -> None:
         sid = secrets.token_hex(16) if session_id is None else session_id
-        if not isinstance(sid, str) or not _SESSION_ID.match(sid):
+        if not isinstance(sid, str) or not _SESSION_ID.fullmatch(sid):
             raise FirewallError(
                 "session_id must be 1-128 characters from A-Z a-z 0-9 . _ : -"
             )
