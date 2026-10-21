@@ -20,7 +20,7 @@ scanners = [
 # Left unpinned deliberately: the adapter has not been exercised against a real
 # Agent Kernel install yet, so no compatible range has been confirmed. Add a
 # lower bound once acf.adapters.agent_kernel is smoke-tested against one.
-agentkernel = ["agentkernel"]
+agentkernel = ["agentkernel; python_version >= '3.12'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
