@@ -65,10 +65,27 @@ def test_explicit_id_is_kept(firewall):
     assert firewall.sent[0]["session_id"] == "run-42:tenant.a"
 
 
-@pytest.mark.parametrize("bad", ["", "has space", "semi;colon", "x" * 129])
-def test_malformed_ids_fail_early(firewall, bad):
-    with pytest.raises(FirewallError):
-        firewall.session(bad)
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "", "has space", "semi;colon", "x" * 129,
+        "run-1\n", "x" * 128 + "\n", "run-1\r\n", "run-1\u2028",
+    ],
+)
+@pytest.mark.parametrize("scoped", [False, True])
+def test_malformed_ids_fail_early(firewall, bad, scoped):
+    scope = {"allowed_tools": ["search"]} if scoped else {}
+    with pytest.raises(FirewallError, match="session_id must be"):
+        firewall.session(bad, **scope)
+    assert firewall.sent == []
+
+
+@pytest.mark.parametrize("session_id", ["a", "A0._:-", "x" * 128])
+def test_valid_session_id_boundaries_are_kept(firewall, session_id):
+    session = firewall.session(session_id)
+    session.on_prompt("hello")
+    assert session.id == session_id
+    assert firewall.sent[0]["session_id"] == session_id
 
 
 def test_session_payloads_match_firewall_payloads_apart_from_the_id(firewall):

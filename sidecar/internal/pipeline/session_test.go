@@ -101,7 +101,10 @@ func TestSession_MalformedIDIsHardBlocked(t *testing.T) {
 	defer store.Stop()
 	pl := sessionPipeline(store, &stateCapture{verdict: "ALLOW"})
 
-	for _, id := range []string{"has space", "semi;colon", string(make([]byte, 129))} {
+	for _, id := range []string{
+		"has space", "semi;colon", string(make([]byte, 129)),
+		"run-1\n", "run-1\r\n", "run-1\u2028",
+	} {
 		res := pl.Run(prompt(id))
 		if res.Decision != decision.Block || res.BlockedAt != "session" {
 			t.Errorf("session id %q: decision=%d blocked_at=%q, want BLOCK at session", id, res.Decision, res.BlockedAt)
