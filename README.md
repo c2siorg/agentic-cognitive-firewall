@@ -373,6 +373,7 @@ gaps against MITRE ATLAS.
 - [Semantic scanner](docs/semantic-scanner.md) — the optional embedding-based detector
 - [Crypto](docs/crypto.md) — HMAC signing and nonce replay protection
 - [MITRE ATLAS analysis](docs/mitre-atlas-analysis.md) — threat mapping and residual risk
+- [NIST SP 800-53 SI-10 mapping](docs/nist-800-53-mapping.md) — information input validation and residual risk
 - [Phase 1](docs/phase1.md) · [Phase 2](docs/phase2.md) · [Phase 3](docs/phase3.md) — implementation notes per phase
 - [Policies](policies/v1/README.md) — the Rego policies and their coverage
 - [Philosophy](PHILOSOPHY.md) — design principles
