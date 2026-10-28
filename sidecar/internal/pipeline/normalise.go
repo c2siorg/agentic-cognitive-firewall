@@ -39,7 +39,7 @@ var zeroWidthChars = []rune{
 // leetspeakMap maps common leet substitutions to their ASCII equivalents.
 var leetspeakMap = map[rune]rune{
 	'0': 'o',
-	'1': 'l',
+	'1': 'i',
 	'3': 'e',
 	'4': 'a',
 	'5': 's',
