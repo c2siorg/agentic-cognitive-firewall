@@ -124,6 +124,11 @@ def decode_response(data: bytes) -> dict:
         )
 
     decision, san_len = struct.unpack_from(_RESP_FMT, data, 0)
+    if len(data) < 5 + san_len:
+        raise FrameError(
+            f"truncated sanitised payload: got {len(data) - 5} bytes, want {san_len}"
+        )
+
     sanitised = data[5 : 5 + san_len] if san_len > 0 else b""
 
     return {
