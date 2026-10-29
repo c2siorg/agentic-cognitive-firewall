@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -476,5 +477,23 @@ func TestScan_ParamScanSkipDoesNotCoverArrayValues(t *testing.T) {
 	}, cfg)
 	if !hasSignal(rc, "shell_metacharacter") {
 		t.Errorf("array under an exempt param name inherited the exemption, got %v", rc.Signals)
+	}
+}
+
+func TestFlattenValue_Numeric(t *testing.T) {
+	cases := []struct {
+		val  any
+		want string
+	}{
+		{float64(987654321012), "987654321012"},
+		{int64(987654321012), "987654321012"},
+		{123, "123"},
+		{json.Number("987654321012"), "987654321012"},
+		{[]any{1, "two", 3.5}, "1 two 3.5"},
+	}
+	for _, tc := range cases {
+		if got := flattenValue(tc.val); got != tc.want {
+			t.Errorf("flattenValue(%v) = %q, want %q", tc.val, got, tc.want)
+		}
 	}
 }
