@@ -156,6 +156,18 @@ test("firewallNode throws on BLOCK and writes back a sanitised value", async () 
   }
 });
 
+test("firewallNode validates missing state key and input types", async () => {
+  const sidecar = await fakeSidecar(() => [0]);
+  const fw = new Firewall({ socketPath: sidecar.where, hmacKey: KEY });
+  const node = firewallNode(fw, "onPrompt", "message");
+  try {
+    await assert.rejects(node({ otherKey: "hello" }), FirewallError);
+    await assert.rejects(node({ message: 12345 }), TypeError);
+  } finally {
+    await sidecar.close();
+  }
+});
+
 test("an absent sidecar is a connection error after retries", async () => {
   const fw = new Firewall({ socketPath: socketPath(), hmacKey: KEY });
   await assert.rejects(fw.onPrompt("hello"), FirewallConnectionError);

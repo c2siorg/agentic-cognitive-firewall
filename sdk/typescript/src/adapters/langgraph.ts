@@ -14,7 +14,7 @@
  */
 import type { Firewall } from "../firewall";
 import type { Session } from "../session";
-import { Decision, FirewallBlocked, isSanitised } from "../models";
+import { Decision, FirewallBlocked, FirewallError, isSanitised } from "../models";
 
 export type Guard = Firewall | Session;
 export type NodeHook = "onPrompt" | "onContext" | "onToolResult";
@@ -26,6 +26,9 @@ export function firewallNode<State extends Record<string, unknown>>(
   outputKey: keyof State & string = inputKey,
 ): (state: State) => Promise<Partial<State>> {
   return async (state: State) => {
+    if (!(inputKey in state)) {
+      throw new FirewallError(`firewallNode: state is missing required key "${inputKey}"`);
+    }
     const value = state[inputKey];
     if (hook === "onContext") {
       if (!Array.isArray(value)) throw new TypeError(`${inputKey} must be a list of strings`);
@@ -35,9 +38,12 @@ export function firewallNode<State extends Record<string, unknown>>(
       }
       return { [outputKey]: results.map((r) => r.sanitisedText ?? r.original) } as Partial<State>;
     }
+    if (hook === "onPrompt" && typeof value !== "string") {
+      throw new TypeError(`${inputKey} must be a string`);
+    }
     const result =
       hook === "onPrompt"
-        ? await guard.onPrompt(String(value))
+        ? await guard.onPrompt(value as string)
         : await guard.onToolResult(String((state as Record<string, unknown>).tool ?? "tool"), value);
     if (result === Decision.BLOCK) {
       throw new FirewallBlocked(`firewall node blocked ${inputKey} at ${hook}`, hook);
