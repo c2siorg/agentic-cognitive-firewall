@@ -132,8 +132,15 @@ def test_decode_response_sanitise():
 
 
 def test_decode_response_truncated():
-    with pytest.raises(FrameError, match="truncated"):
+    with pytest.raises(FrameError, match="truncated response"):
         decode_response(b"\x00\x00\x00")
+
+
+def test_decode_response_truncated_payload():
+    # Header declares a 16-byte sanitised payload, but only 3 bytes are provided.
+    truncated = b"\x01" + struct.pack(">I", 16) + b"abc"
+    with pytest.raises(FrameError, match="truncated sanitised payload"):
+        decode_response(truncated)
 
 
 # ── signed_message ────────────────────────────────────────────────────────────
