@@ -40,6 +40,8 @@ type Timing struct {
 	HookType     string
 	Decision     byte
 	BlockedAt    string
+	RiskScore    float64
+	Signals      []string
 	PayloadBytes int
 	// Read covers reading the frame off the connection, including any wait
 	// for the client to finish sending it.
@@ -214,6 +216,13 @@ func (l *Listener) handleConn(conn net.Conn) {
 			tm.HookType = rc.HookType
 			tm.Decision = decision
 			tm.BlockedAt = result.BlockedAt
+			tm.RiskScore = result.Score
+
+			tm.Signals = make([]string, 0, len(result.Signals))
+			for _, signal := range result.Signals {
+				tm.Signals = append(tm.Signals, signal.Category)
+			}
+
 			tm.PayloadBytes = len(rf.Payload)
 			tm.Total = sw.total()
 			l.cfg.OnTiming(tm)
