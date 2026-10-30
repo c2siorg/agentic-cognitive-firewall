@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -112,14 +113,15 @@ func main() {
 		address = cfg.SocketPath
 	}
 
-	// Per-request timing log for overhead measurement. Off unless
-	// ACF_TIMING_LOG names a file.
-	var onTiming func(transport.Timing)
+	// Optional timing log used for overhead measurements.
+	var timingRecord func(transport.Timing)
+
 	if p := os.Getenv("ACF_TIMING_LOG"); p != "" {
 		tl, err := telemetry.NewTimingLog(p)
 		if err != nil {
 			log.Fatalf("sidecar: failed to open timing log %s: %v", p, err)
 		}
+
 		defer func() {
 			if err := tl.Close(); err != nil {
 				log.Printf("sidecar: timing log close: %v", err)
@@ -128,10 +130,51 @@ func main() {
 				log.Printf("sidecar: timing log dropped %d records", n)
 			}
 		}()
-		onTiming = tl.Record
+
+		timingRecord = tl.Record
 		log.Printf("sidecar: timing log enabled (%s)", p)
 	}
 
+	// Optional OpenTelemetry exporter.
+	var otelExporter *telemetry.OTelExporter
+
+	if endpoint := os.Getenv("ACF_OTEL_ENDPOINT"); endpoint != "" {
+		exporter, err := telemetry.NewOTelExporter(
+			context.Background(),
+			endpoint,
+		)
+		if err != nil {
+			// Observability failures must not prevent enforcement from starting.
+			log.Printf("sidecar: OpenTelemetry disabled: %v", err)
+		} else {
+			otelExporter = exporter
+
+			defer func() {
+				if err := otelExporter.Close(); err != nil {
+					log.Printf("sidecar: OpenTelemetry close: %v", err)
+				}
+				if n := otelExporter.Dropped(); n > 0 {
+					log.Printf("sidecar: OpenTelemetry dropped %d events", n)
+				}
+			}()
+
+			log.Printf("sidecar: OpenTelemetry enabled (%s)", endpoint)
+		}
+	}
+
+	// The transport callback only records to non-blocking queues.
+	var onTiming func(transport.Timing)
+
+	if timingRecord != nil || otelExporter != nil {
+		onTiming = func(tm transport.Timing) {
+			if timingRecord != nil {
+				timingRecord(tm)
+			}
+			if otelExporter != nil {
+				otelExporter.Record(timingToSpanEvent(tm))
+			}
+		}
+	}
 	// 8. Create and start listener.
 	ln, err := transport.NewListener(transport.Config{
 		Address:    address,
@@ -162,6 +205,54 @@ func main() {
 		if err != nil {
 			log.Fatalf("sidecar: listener error: %v", err)
 		}
+	}
+}
+func timingToSpanEvent(tm transport.Timing) telemetry.SpanEvent {
+	decisionName := "UNKNOWN"
+
+	switch tm.Decision {
+	case transport.DecisionAllow:
+		decisionName = "ALLOW"
+	case transport.DecisionSanitise:
+		decisionName = "SANITISE"
+	case transport.DecisionBlock:
+		decisionName = "BLOCK"
+	}
+
+	stages := make(
+		[]telemetry.StageEvent,
+		0,
+		len(tm.Pipeline.Stages)+2,
+	)
+
+	for _, stage := range tm.Pipeline.Stages {
+		stages = append(stages, telemetry.StageEvent{
+			Name:     stage.Name,
+			Duration: stage.Duration,
+		})
+	}
+
+	if tm.Pipeline.Policy > 0 {
+		stages = append(stages, telemetry.StageEvent{
+			Name:     "opa",
+			Duration: tm.Pipeline.Policy,
+		})
+	}
+
+	if tm.Pipeline.Sanitise > 0 {
+		stages = append(stages, telemetry.StageEvent{
+			Name:     "executor",
+			Duration: tm.Pipeline.Sanitise,
+		})
+	}
+
+	return telemetry.SpanEvent{
+		HookType:  tm.HookType,
+		Decision:  decisionName,
+		RiskScore: tm.RiskScore,
+		Signals:   tm.Signals,
+		Stages:    stages,
+		Total:     tm.Total,
 	}
 }
 
