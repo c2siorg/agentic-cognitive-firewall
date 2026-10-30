@@ -27,12 +27,6 @@ def test_csv_choices_rejects_unknown_and_empty():
         harness.csv_choices("", list(harness.ARMS), "arms")
 
 
-def test_decode_sanitised_unwraps_json_strings_only():
-    assert harness.decode_sanitised('"redacted text"') == "redacted text"
-    assert harness.decode_sanitised("not json") == "not json"
-    assert harness.decode_sanitised('{"a": 1}') == '{"a": 1}'
-
-
 def test_rate_and_percent_handle_empty_denominators():
     assert harness.rate(3, 4) == 0.75
     assert harness.rate(0, 0) is None

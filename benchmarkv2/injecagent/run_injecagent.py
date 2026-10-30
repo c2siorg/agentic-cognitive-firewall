@@ -621,21 +621,12 @@ class SidecarPool:
             self.sidecars.clear()
 
 
-def decode_sanitised(text: str) -> str:
-    """The sidecar returns the sanitised payload JSON-encoded; unwrap strings."""
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError:
-        return text
-    return value if isinstance(value, str) else text
-
-
 def screen_observation(firewall: Firewall, text: str) -> tuple[str, str]:
     result = firewall.on_context([text])[0]
     if result.decision is Decision.ALLOW:
         return text, "ALLOW"
     if result.decision is Decision.SANITISE and result.sanitised_text is not None:
-        return decode_sanitised(result.sanitised_text), "SANITISE"
+        return result.sanitised_text, "SANITISE"
     return WITHHELD_OBSERVATION, result.decision.name
 
 

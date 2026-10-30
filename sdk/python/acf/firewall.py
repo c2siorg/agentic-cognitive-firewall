@@ -268,16 +268,7 @@ class Firewall:
             provenance="tool_output",
             session_id=session_id,
         )
-        decision = self._send(payload)
-        if isinstance(decision, SanitiseResult) and decision.sanitised_text:
-            # The sidecar wraps a sanitised object payload as {"sanitised": text}.
-            try:
-                wrapped = json.loads(decision.sanitised_text)
-            except json.JSONDecodeError:
-                wrapped = None
-            if isinstance(wrapped, dict) and isinstance(wrapped.get("sanitised"), str):
-                decision.sanitised_text = wrapped["sanitised"]
-        return decision
+        return self._send(payload)
 
     def _on_task(self, scope: dict[str, Any], *, session_id: str) -> Decision | SanitiseResult:
         payload = self._build_payload("on_task", scope, provenance="developer", session_id=session_id)
@@ -446,6 +437,26 @@ class Firewall:
             return SanitiseResult(
                 decision=decision,
                 sanitised_payload=raw,
-                sanitised_text=text,
+                sanitised_text=_unwrap_sanitised(text),
             )
         return decision
+
+
+def _unwrap_sanitised(text: str | None) -> str | None:
+    """Recover the cleaned text from the sidecar's encoding of it.
+
+    The sidecar JSON-encodes the sanitised value: a string payload comes back
+    as a JSON string, any other payload as {"sanitised": text}. Anything else
+    is returned unchanged.
+    """
+    if text is None:
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and len(value) == 1 and isinstance(value.get("sanitised"), str):
+        return value["sanitised"]
+    return text

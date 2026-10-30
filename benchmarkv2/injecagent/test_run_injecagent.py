@@ -30,7 +30,7 @@ class FakeFirewall:
         self.context_decision = context_decision
 
     def on_context(self, chunks: list[str]) -> list[ChunkResult]:
-        sanitised = '"[REDACTED]"' if self.context_decision is Decision.SANITISE else None
+        sanitised = "[REDACTED]" if self.context_decision is Decision.SANITISE else None
         return [
             ChunkResult(original=chunk, decision=self.context_decision, sanitised_text=sanitised)
             for chunk in chunks
@@ -171,12 +171,6 @@ def test_parse_tool_params_modes() -> None:
     assert run_injecagent.parse_tool_params('{"a": 1}') == ({"a": 1}, "json")
     assert run_injecagent.parse_tool_params("{'a': 1}") == ({"a": 1}, "python_literal")
     assert run_injecagent.parse_tool_params("not a dict") == ({"_unparsed": "not a dict"}, "raw")
-
-
-def test_decode_sanitised_unwraps_json_strings_only() -> None:
-    assert run_injecagent.decode_sanitised('"[REDACTED]"') == "[REDACTED]"
-    assert run_injecagent.decode_sanitised('{"a": 1}') == '{"a": 1}'
-    assert run_injecagent.decode_sanitised("plain text") == "plain text"
 
 
 def test_scores_follow_injecagent_formulas() -> None:
