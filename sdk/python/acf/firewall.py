@@ -24,6 +24,17 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
+from .contracts import (
+    ContextPayload,
+    HookType,
+    MemoryPayload,
+    PromptPayload,
+    ProvenanceType,
+    Signal,
+    ToolCallPayload,
+    ValidateRequest,
+    ValidateResponse,
+)
 from .models import (
     ChunkResult,
     Decision,
@@ -339,16 +350,38 @@ class Firewall:
         session_id: str = "",
     ) -> bytes:
         signals = self._run_semantic_scanner(hook_type, content)
-        ctx = {
-            "score":       0.0,
-            "signals":     signals,
-            "provenance":  provenance,
-            "session_id":  session_id,
-            "hook_type":   hook_type,
-            "payload":     content,
-            "state":       None,
-        }
-        return json.dumps(ctx, separators=(",", ":")).encode("utf-8")
+
+        # Build typed payload based on hook type.
+        typed_payload: Any
+        if hook_type == "on_prompt":
+            typed_payload = PromptPayload(text=content) if isinstance(content, str) else PromptPayload(text=str(content))
+        elif hook_type == "on_context":
+            typed_payload = ContextPayload(content=content) if isinstance(content, str) else ContextPayload(content=str(content))
+        elif hook_type == "on_tool_call" and isinstance(content, dict):
+            typed_payload = ToolCallPayload(name=content.get("name", ""), params=content.get("params", {}))
+        elif hook_type == "on_memory" and isinstance(content, dict):
+            typed_payload = MemoryPayload(key=content.get("key", ""), value=content.get("value", ""), op=content.get("op", "write"))
+        else:
+            typed_payload = PromptPayload(text=str(content))
+
+        # Resolve enums, falling back to raw strings for forward compat.
+        try:
+            ht = HookType(hook_type)
+        except ValueError:
+            ht = hook_type  # type: ignore[assignment]
+        try:
+            prov = ProvenanceType(provenance)
+        except ValueError:
+            prov = provenance  # type: ignore[assignment]
+
+        req = ValidateRequest(
+            hook_type=ht,
+            provenance=prov,
+            payload=typed_payload,
+            signals=[Signal(category=s["category"], score=s["score"]) for s in signals],
+            session_id=session_id,
+        )
+        return req.encode()
 
     def _run_semantic_scanner(self, hook_type: str, content: Any) -> list[dict]:
         """Run the semantic scanner on string content and return wire-format signals.
