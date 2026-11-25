@@ -399,6 +399,7 @@
       },
       "expected": "ALLOW",
       "desired": "BLOCK",
+      "closed": true,
       "gap": "tool params are not pattern-scanned; CanonicalText is the tool name only, so an injected instruction in a param value is never seen"
     },
     {

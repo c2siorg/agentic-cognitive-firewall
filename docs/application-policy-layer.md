@@ -215,8 +215,10 @@ State these when citing the layer:
   path, or free text paraphrased from an injection is not tainted.
 - **Trusted means trusted.** Output from `trusted_tools` and values in the
   user's prompt or `trusted_values` are never treated as tainted.
-- **Sanitised tool output is redacted whole** when the scanned text is not an
-  exact substring of the result. Span-level redaction is an existing TODO.
+- **Sanitised content falls back to whole-value redaction** only when a sanitised
+  decision has no matched lexical spans in the primary field (e.g. semantic-only
+  signals or matches in another map field); lexical matches redact only the
+  matched spans.
 - **Memory reads still trust the client's `hmac_valid` flag.** A real fix needs
   a sidecar-signed stamp returned to the client, which needs a new response
   field and a wire version bump. Not part of this layer.

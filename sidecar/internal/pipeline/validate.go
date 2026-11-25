@@ -34,6 +34,8 @@ func (v *ValidateStage) Run(rc *riskcontext.RiskContext) (hardBlock bool) {
 	rc.ClientSignals, rc.Signals = rc.Signals, nil
 	rc.Score = 0
 	rc.State = nil
+	rc.MatchedSpans = nil
+	rc.SanitisedText = ""
 
 	h, ok := hooks.Lookup(rc.HookType)
 	if !ok {

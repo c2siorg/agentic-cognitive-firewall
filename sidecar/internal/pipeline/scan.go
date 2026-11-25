@@ -12,7 +12,9 @@ package pipeline
 
 import (
 	"slices"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cloudflare/ahocorasick"
 
@@ -28,9 +30,10 @@ var pathTraversalPatterns = []string{"../", "..\\", "/..", "\\.."}
 
 // ScanStage runs lexical pattern matching and allowlist checks.
 type ScanStage struct {
-	cfg     *config.Config
-	matcher *ahocorasick.Matcher
-	cats    [][]string // parallel to matcher dictionary: categories per normalised pattern
+	cfg      *config.Config
+	matcher  *ahocorasick.Matcher
+	patterns []string   // parallel to matcher dictionary: lowercased normalised patterns
+	cats     [][]string // parallel to matcher dictionary: categories per normalised pattern
 }
 
 // NewScanStage constructs a ScanStage. entries is the structured pattern list
@@ -54,6 +57,7 @@ func NewScanStage(cfg *config.Config, entries []config.PatternEntry) *ScanStage 
 			i = len(dict)
 			index[norm] = i
 			dict = append(dict, []byte(norm))
+			s.patterns = append(s.patterns, norm)
 			s.cats = append(s.cats, nil)
 		}
 		cat := e.Category
@@ -74,6 +78,7 @@ func (s *ScanStage) Name() string { return "scan" }
 // Always returns hardBlock=false — signal weighting and block decisions
 // are the aggregate stage's responsibility.
 func (s *ScanStage) Run(rc *riskcontext.RiskContext) (hardBlock bool) {
+	rc.MatchedSpans = nil
 	text := strings.ToLower(rc.CanonicalText)
 
 	// 1. Aho-Corasick lexical scan with per-category signal emission.
@@ -92,6 +97,7 @@ func (s *ScanStage) Run(rc *riskcontext.RiskContext) (hardBlock bool) {
 			if !seen["jailbreak_pattern"] {
 				rc.Signals = append(rc.Signals, riskcontext.Signal{Category: "jailbreak_pattern"})
 			}
+			rc.MatchedSpans = s.findMatchedSpans(rc.Payload, hits)
 		}
 	}
 
@@ -159,18 +165,98 @@ func (s *ScanStage) hasDangerousParam(params map[string]any, toolName, check str
 	return false
 }
 
-// flattenStrings recursively collects all string leaf values from a map.
-// Slices are walked too: JSON arrays are ordinary tool parameters (argv-style
-// args, path lists), and skipping them let a payload evade the dangerous-param
-// checks simply by being wrapped in [].
+// flattenStrings recursively collects all string leaf values from a map in
+// deterministic key order. Slices are walked too: JSON arrays are ordinary tool
+// parameters (argv-style args, path lists), and skipping them let a payload
+// evade the dangerous-param checks simply by being wrapped in [].
 func flattenStrings(m map[string]any) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var parts []string
-	for _, v := range m {
-		if s := flattenValue(v); s != "" {
+	for _, k := range keys {
+		if s := flattenValue(m[k]); s != "" {
 			parts = append(parts, s)
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// findMatchedSpans maps the matched dictionary entries onto byte ranges in the
+// primary sanitisable text field of payload, so ApplySanitise can redact only
+// the matched spans rather than wiping the entire payload.
+func (s *ScanStage) findMatchedSpans(payload any, hits []int) []riskcontext.TextSpan {
+	field, rawTarget, ok := sanitiseTargetField(payload)
+	if !ok || rawTarget == "" {
+		return nil
+	}
+	tracked := toLowerTracked(normaliseTracked(rawTarget))
+	if tracked.text == "" || len(tracked.spans) != len(tracked.text) {
+		return nil
+	}
+
+	seenIdx := make(map[int]bool, len(hits))
+	var spans []riskcontext.TextSpan
+	for _, idx := range hits {
+		if seenIdx[idx] || idx < 0 || idx >= len(s.patterns) {
+			continue
+		}
+		seenIdx[idx] = true
+		pat := s.patterns[idx]
+		if pat == "" {
+			continue
+		}
+		for pos := 0; pos <= len(tracked.text)-len(pat); {
+			rel := strings.Index(tracked.text[pos:], pat)
+			if rel < 0 {
+				break
+			}
+			lo := pos + rel
+			hi := lo + len(pat)
+			bs := mergeByteSpans(tracked.spans[lo:hi])
+			if bs.end > bs.start {
+				spans = append(spans, riskcontext.TextSpan{
+					Field: field,
+					Start: bs.start,
+					End:   bs.end,
+				})
+			}
+			pos = hi
+			if _, w := utf8.DecodeRuneInString(tracked.text[lo:]); w > 0 && lo+w < hi {
+				pos = lo + w
+			}
+		}
+	}
+	return mergeTextSpans(spans)
+}
+
+func mergeTextSpans(spans []riskcontext.TextSpan) []riskcontext.TextSpan {
+	if len(spans) <= 1 {
+		return spans
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].Field != spans[j].Field {
+			return spans[i].Field < spans[j].Field
+		}
+		if spans[i].Start != spans[j].Start {
+			return spans[i].Start < spans[j].Start
+		}
+		return spans[i].End < spans[j].End
+	})
+	out := spans[:1]
+	for _, s := range spans[1:] {
+		last := &out[len(out)-1]
+		if s.Field == last.Field && s.Start <= last.End {
+			if s.End > last.End {
+				last.End = s.End
+			}
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // flattenValue collects string leaves from any JSON-shaped value.

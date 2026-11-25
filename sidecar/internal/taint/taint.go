@@ -11,10 +11,15 @@
 package taint
 
 import (
+	"encoding/base64"
 	"math/big"
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // Token is one extracted value.
@@ -67,6 +72,18 @@ func Extract(text string) []Token {
 		u, host := normaliseURL(m)
 		add(Token{Kind: "url", Value: u})
 		add(Token{Kind: "host", Value: host})
+		// Extract nested URLs embedded inside query/path parameters (e.g.
+		// open-redirect targets like https://safe.example/?next=https://evil.example).
+		if schemeEnd := strings.Index(m, "://"); schemeEnd >= 0 {
+			rest := m[schemeEnd+3:]
+			if slash := strings.IndexAny(rest, "/?#"); slash >= 0 {
+				for _, nested := range urlRe.FindAllString(rest[slash:], -1) {
+					nu, nhost := normaliseURL(nested)
+					add(Token{Kind: "url", Value: nu})
+					add(Token{Kind: "host", Value: nhost})
+				}
+			}
+		}
 	}
 	for _, m := range wwwRe.FindAllString(text, -1) {
 		// Only the host: the scheme is unknown, and the host is what a link
@@ -151,4 +168,180 @@ func digitsOnly(s string) string {
 		}
 	}
 	return b.String()
+}
+
+var zeroWidthTaintRunes = map[rune]bool{
+	'\u200b': true,
+	'\u200c': true,
+	'\u200d': true,
+	'\u00ad': true,
+	'\ufeff': true,
+	'\u2060': true,
+	'\u180e': true,
+}
+
+var base64TaintRe = regexp.MustCompile(`[A-Za-z0-9+/_-]{16,}={0,2}`)
+
+// NormalizeBasic strips invisible zero-width characters and applies Unicode NFKC
+// normalisation without altering digits or punctuation (unlike leetspeak
+// folding), so emails, URLs, IBANs and numbers remain intact.
+func NormalizeBasic(text string) string {
+	if text == "" {
+		return ""
+	}
+	text = norm.NFKC.String(text)
+	return strings.Map(func(r rune) rune {
+		if zeroWidthTaintRunes[r] {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+// ExtractClean extracts tokens from trusted text (user prompts and declared
+// trusted_values) after basic Unicode and zero-width normalisation.
+func ExtractClean(text string) []Token {
+	return Extract(NormalizeBasic(text))
+}
+
+// ExtractUntrusted extracts tokens from untrusted content and tool call
+// parameters across both basic-normalised text and de-obfuscated variants
+// (recursive percent-decoding and printable Base64 decoding), so obfuscated
+// addresses, IBANs and URLs cannot evade provenance tracking.
+func ExtractUntrusted(text string) []Token {
+	if text == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []Token
+	appendDistinct := func(tokens []Token) {
+		for _, tok := range tokens {
+			key := tok.Key()
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, tok)
+			}
+		}
+	}
+
+	basic := NormalizeBasic(text)
+	appendDistinct(Extract(basic))
+
+	decoded := decodeUntrustedLayers(text)
+	if decoded != text {
+		if normDecoded := NormalizeBasic(decoded); normDecoded != basic {
+			appendDistinct(Extract(normDecoded))
+		}
+	}
+	return out
+}
+
+// decodeUntrustedLayers recursively percent-decodes (%XX only, keeping '+'
+// intact so email+tag and +country phone prefixes are preserved) and decodes
+// printable Base64 whole payloads or embedded tokens.
+func decodeUntrustedLayers(text string) string {
+	const maxDepth = 8
+	for depth := 0; depth < maxDepth; depth++ {
+		next := decodePercentOnly(text)
+		next = decodeBase64ForTaint(next)
+		if next == text {
+			break
+		}
+		text = next
+	}
+	return text
+}
+
+func decodePercentOnly(text string) string {
+	for depth := 0; depth < 8; depth++ {
+		if !strings.ContainsRune(text, '%') {
+			return text
+		}
+		var b strings.Builder
+		b.Grow(len(text))
+		changed := false
+		for i := 0; i < len(text); {
+			if text[i] == '%' && i+2 < len(text) {
+				if hi, ok1 := unhexByte(text[i+1]); ok1 {
+					if lo, ok2 := unhexByte(text[i+2]); ok2 {
+						b.WriteByte(hi<<4 | lo)
+						i += 3
+						changed = true
+						continue
+					}
+				}
+			}
+			b.WriteByte(text[i])
+			i++
+		}
+		if !changed {
+			return text
+		}
+		candidate := b.String()
+		if !utf8.ValidString(candidate) {
+			return text
+		}
+		text = candidate
+	}
+	return text
+}
+
+func unhexByte(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func decodeBase64ForTaint(text string) string {
+	if trimmed := strings.TrimSpace(text); len(trimmed) >= 8 {
+		if decoded, ok := decodePrintableBase64(trimmed); ok {
+			return decoded
+		}
+	}
+	return base64TaintRe.ReplaceAllStringFunc(text, func(tok string) string {
+		if decoded, ok := decodePrintableBase64(tok); ok && (hasTokenContext(decoded) || len(Extract(decoded)) > 0) {
+			return decoded
+		}
+		return tok
+	})
+}
+
+func decodePrintableBase64(tok string) (string, bool) {
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		decoded, err := enc.DecodeString(tok)
+		if err != nil {
+			continue
+		}
+		s := string(decoded)
+		if isPrintableUTF8(s) {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+func isPrintableUTF8(s string) bool {
+	if !utf8.ValidString(s) || strings.ContainsRune(s, 0) {
+		return false
+	}
+	for _, r := range s {
+		if r == unicode.ReplacementChar || (!unicode.IsPrint(r) && !unicode.IsSpace(r)) {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+func hasTokenContext(s string) bool {
+	return strings.ContainsAny(s, " \t\r\n@:/")
 }

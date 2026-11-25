@@ -12,6 +12,15 @@ type Signal struct {
 	Score    float64 `json:"score"`
 }
 
+// TextSpan is a half-open byte range [Start, End) in the original string of
+// Payload (or the named field when Payload is a map) corresponding to a lexical
+// match found by the scan stage. Internal to the sidecar pipeline only.
+type TextSpan struct {
+	Field string
+	Start int
+	End   int
+}
+
 // RiskContext is the payload exchanged over IPC and passed through every
 // pipeline stage in the sidecar. It is JSON-serialised as the frame payload.
 type RiskContext struct {
@@ -62,4 +71,14 @@ type RiskContext struct {
 	// stage merges back only categories with a configured weight, scored by
 	// that weight. Internal; not serialised.
 	ClientSignals []Signal `json:"-"`
+
+	// MatchedSpans holds the original payload byte ranges [Start, End) of
+	// lexical matches discovered by the scan stage, so the executor can redact
+	// only the matched spans instead of the entire payload. Internal; not serialised.
+	MatchedSpans []TextSpan `json:"-"`
+
+	// SanitisedText holds the transformed text produced by the executor when a
+	// decision is SANITISE, so downstream recorders (e.g. session trust
+	// extraction) never trust tokens removed by redaction. Internal; not serialised.
+	SanitisedText string `json:"-"`
 }

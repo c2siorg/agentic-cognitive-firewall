@@ -80,7 +80,7 @@ func taintFindings(payload any, sess *state.Session) []any {
 
 	var findings []any
 	for _, name := range names {
-		for _, tok := range taint.Extract(flattenValue(params[name])) {
+		for _, tok := range taint.ExtractUntrusted(flattenValue(params[name])) {
 			key := tok.Key()
 			if sess.Trusted[key] {
 				continue
@@ -155,7 +155,7 @@ func (s *SessionStage) Record(rc *riskcontext.RiskContext, d byte) {
 				if scope, err := state.ParseTaskScope(rc.Payload); err == nil {
 					sess.Task = scope
 					for _, v := range scope.TrustedValues {
-						for _, tok := range taint.Extract(v) {
+						for _, tok := range taint.ExtractClean(v) {
 							sess.AddTrusted(tok.Key())
 						}
 					}
@@ -163,10 +163,16 @@ func (s *SessionStage) Record(rc *riskcontext.RiskContext, d byte) {
 			}
 		case "on_prompt":
 			// The user's own request: values in it are the user's to direct.
-			if text, ok := rc.Payload.(string); ok {
-				for _, tok := range taint.Extract(text) {
-					sess.AddTrusted(tok.Key())
-				}
+			// On SANITISE, extract only from the redacted text so tokens inside
+			// removed spans are never promoted to trusted.
+			text := ""
+			if d == decision.Sanitise {
+				text = rc.SanitisedText
+			} else if raw, ok := rc.Payload.(string); ok {
+				text = raw
+			}
+			for _, tok := range taint.ExtractClean(text) {
+				sess.AddTrusted(tok.Key())
 			}
 		case "on_context", "on_tool_result":
 			// Content the agent is about to read. A SANITISE is recorded too:
@@ -174,7 +180,7 @@ func (s *SessionStage) Record(rc *riskcontext.RiskContext, d byte) {
 			// block more, never less.
 			text, tool := untrustedText(rc)
 			src := state.TaintSource{Hook: rc.HookType, Tool: tool}
-			for _, tok := range taint.Extract(text) {
+			for _, tok := range taint.ExtractUntrusted(text) {
 				sess.AddUntrusted(tok.Key(), src)
 			}
 		}

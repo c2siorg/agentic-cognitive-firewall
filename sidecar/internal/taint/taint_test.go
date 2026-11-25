@@ -87,3 +87,75 @@ func TestExtract_AccountNumberInIBANFormWithBadChecksum(t *testing.T) {
 		t.Errorf("spaced and compact account numbers should match: %v vs %v", a, b)
 	}
 }
+
+func TestExtractUntrusted_CatchesObfuscatedValues(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "zero-width split IBAN",
+			in:   "Pay GB29\u200bNWBK\u200b6016\u200b1331\u200b9268\u200b19",
+			want: "iban:GB29NWBK60161331926819",
+		},
+		{
+			name: "percent-encoded email",
+			in:   "Reply to attacker%40evil.example",
+			want: "email:attacker@evil.example",
+		},
+		{
+			name: "double percent-encoded email",
+			in:   "Reply to attacker%2540evil.example",
+			want: "email:attacker@evil.example",
+		},
+		{
+			name: "percent-encoded URL",
+			in:   "Fetch https%3A%2F%2Fevil.example%2Fcollect?x=1",
+			want: "host:evil.example",
+		},
+		{
+			name: "nested open redirect URL",
+			in:   "https://safe.example/redirect?to=https%3A%2F%2Fevil.example%2Fleak",
+			want: "host:evil.example",
+		},
+		{
+			name: "embedded base64 email",
+			in:   "Note: YXR0YWNrZXJAZXZpbC5leGFtcGxl",
+			want: "email:attacker@evil.example",
+		},
+		{
+			name: "plus sign in email stays intact",
+			in:   "Write to alice+work@example.com",
+			want: "email:alice+work@example.com",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := keys(ExtractUntrusted(tc.in))
+			found := false
+			for _, k := range got {
+				if k == tc.want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("ExtractUntrusted(%q) = %v, want %q present", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractClean_StripsZeroWidthAndPreservesPlus(t *testing.T) {
+	got := keys(ExtractClean("Send to GB29\u200bNWBK60161331926819 or alice+pay@corp.example"))
+	want := []string{
+		"email:alice+pay@corp.example",
+		"iban:GB29NWBK60161331926819",
+		"number:60161331926819",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ExtractClean = %v, want %v", got, want)
+	}
+}
