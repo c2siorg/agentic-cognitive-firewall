@@ -12,6 +12,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"log"
 	"time"
 
@@ -172,6 +173,7 @@ func (p *Pipeline) RunTraced(rc *riskcontext.RiskContext, tr *Trace) Result {
 			if d == decision.Sanitise && len(targets) > 0 {
 				start := tr.now()
 				sanitised = policy.ApplySanitise(targets, rc)
+				rc.SanitisedText = decodeSanitisedText(rc.Payload, sanitised)
 				if tr != nil {
 					tr.Sanitise = clock.Since(start)
 				}
@@ -192,6 +194,26 @@ func (p *Pipeline) RunTraced(rc *riskcontext.RiskContext, tr *Trace) Result {
 		BlockedAt:        blockedAt,
 		SanitisedPayload: sanitised,
 	}
+}
+
+func decodeSanitisedText(payload any, sanitised []byte) string {
+	if len(sanitised) == 0 {
+		return ""
+	}
+	if _, ok := payload.(string); ok {
+		var s string
+		if err := json.Unmarshal(sanitised, &s); err == nil {
+			return s
+		}
+		return ""
+	}
+	var wrapped struct {
+		Sanitised string `json:"sanitised"`
+	}
+	if err := json.Unmarshal(sanitised, &wrapped); err == nil {
+		return wrapped.Sanitised
+	}
+	return ""
 }
 
 // decisionByte converts an OPA decision string to a decision byte constant.

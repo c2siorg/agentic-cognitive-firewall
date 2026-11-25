@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -35,6 +36,14 @@ var zeroWidthChars = []rune{
 	'\u2060', // word joiner
 	'\u180e', // mongolian vowel separator
 }
+
+var zeroWidthSet = func() map[rune]bool {
+	m := make(map[rune]bool, len(zeroWidthChars))
+	for _, r := range zeroWidthChars {
+		m[r] = true
+	}
+	return m
+}()
 
 // leetspeakMap maps common leet substitutions to their ASCII equivalents.
 var leetspeakMap = map[rune]rune{
@@ -67,26 +76,36 @@ func NewNormaliseStage() *NormaliseStage {
 	return &NormaliseStage{}
 }
 
-// payloadText extracts a string representation from the payload.
+// payloadText extracts a deterministic string representation from the payload.
 // For string payloads, returns the string directly.
+// For map payloads, recursively flattens all string leaves in sorted key order
+// (including nested maps and arrays such as on_tool_call params).
 // For other types, uses fmt.Sprintf as a best-effort fallback.
 func payloadText(payload any) string {
 	switch v := payload.(type) {
 	case string:
 		return v
 	case map[string]any:
-		// For structured payloads (on_tool_call, on_context), concatenate all
-		// string values for scanning purposes.
-		var parts []string
-		for _, val := range v {
-			if s, ok := val.(string); ok {
-				parts = append(parts, s)
-			}
-		}
-		return strings.Join(parts, " ")
+		return flattenStrings(v)
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// sanitiseTargetField mirrors policy.payloadFieldAndText so the scan stage
+// maps matches against the same primary text field that ApplySanitise edits.
+func sanitiseTargetField(payload any) (field, text string, ok bool) {
+	switch v := payload.(type) {
+	case string:
+		return "", v, true
+	case map[string]any:
+		for _, key := range []string{"content", "value", "text", "prompt", "result"} {
+			if s, found := v[key].(string); found {
+				return key, s, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 // normalise applies all transforms to text and returns the canonical form.
@@ -251,12 +270,8 @@ func applyNFKC(text string) string {
 
 // stripZeroWidth removes all zero-width and invisible Unicode characters.
 func stripZeroWidth(text string) string {
-	zwSet := make(map[rune]bool, len(zeroWidthChars))
-	for _, r := range zeroWidthChars {
-		zwSet[r] = true
-	}
 	return strings.Map(func(r rune) rune {
-		if zwSet[r] {
+		if zeroWidthSet[r] {
 			return -1 // drop
 		}
 		return r
@@ -304,4 +319,305 @@ func cleanLeetspeak(text string) string {
 		}
 		return r
 	}, text)
+}
+
+// byteSpan records the half-open byte range [start, end) in the original string
+// that produced a byte in the transformed string.
+type byteSpan struct {
+	start int
+	end   int
+}
+
+type trackedText struct {
+	text  string
+	spans []byteSpan
+}
+
+func newTrackedText(raw string) trackedText {
+	spans := make([]byteSpan, len(raw))
+	for i := 0; i < len(raw); i++ {
+		spans[i] = byteSpan{start: i, end: i + 1}
+	}
+	return trackedText{text: raw, spans: spans}
+}
+
+func mergeByteSpans(slice []byteSpan) byteSpan {
+	if len(slice) == 0 {
+		return byteSpan{}
+	}
+	out := slice[0]
+	for _, s := range slice[1:] {
+		if s.start < out.start {
+			out.start = s.start
+		}
+		if s.end > out.end {
+			out.end = s.end
+		}
+	}
+	return out
+}
+
+func appendRepeatedSpan(dst []byteSpan, s byteSpan, count int) []byteSpan {
+	for i := 0; i < count; i++ {
+		dst = append(dst, s)
+	}
+	return dst
+}
+
+// normaliseTracked mirrors normalise(raw) while maintaining per-byte provenance
+// spans back to raw so matched canonical spans can be redacted in original text.
+func normaliseTracked(raw string) trackedText {
+	tt := newTrackedText(raw)
+	tt = decodeURLTracked(tt)
+	tt = decodeBase64Tracked(tt)
+	tt = applyNFKCTracked(tt)
+	tt = stripZeroWidthTracked(tt)
+	tt = collapseWhitespaceTracked(tt)
+	tt = cleanLeetspeakTracked(tt)
+	return tt
+}
+
+func decodeURLTracked(tt trackedText) trackedText {
+	for {
+		if !strings.ContainsAny(tt.text, "%+") {
+			return tt
+		}
+		next, ok := unescapeQueryTracked(tt)
+		if !ok || next.text == tt.text {
+			return tt
+		}
+		tt = next
+	}
+}
+
+func unescapeQueryTracked(tt trackedText) (trackedText, bool) {
+	buf := make([]byte, 0, len(tt.text))
+	spans := make([]byteSpan, 0, len(tt.text))
+	for i := 0; i < len(tt.text); {
+		switch tt.text[i] {
+		case '+':
+			buf = append(buf, ' ')
+			spans = append(spans, tt.spans[i])
+			i++
+		case '%':
+			if i+2 >= len(tt.text) {
+				return tt, false
+			}
+			hi, ok1 := unhexNibble(tt.text[i+1])
+			lo, ok2 := unhexNibble(tt.text[i+2])
+			if !ok1 || !ok2 {
+				return tt, false
+			}
+			buf = append(buf, hi<<4|lo)
+			spans = append(spans, mergeByteSpans(tt.spans[i:i+3]))
+			i += 3
+		default:
+			buf = append(buf, tt.text[i])
+			spans = append(spans, tt.spans[i])
+			i++
+		}
+	}
+	return trackedText{text: string(buf), spans: spans}, true
+}
+
+func unhexNibble(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func decodeBase64Tracked(tt trackedText) trackedText {
+	for {
+		if decoded := tryBase64(tt.text); decoded != tt.text {
+			lead := len(tt.text) - len(strings.TrimLeftFunc(tt.text, unicode.IsSpace))
+			trail := len(strings.TrimRightFunc(tt.text, unicode.IsSpace))
+			if lead >= trail {
+				lead, trail = 0, len(tt.text)
+			}
+			wholeSpan := mergeByteSpans(tt.spans[lead:trail])
+			spans := appendRepeatedSpan(make([]byteSpan, 0, len(decoded)), wholeSpan, len(decoded))
+			tt = trackedText{text: decoded, spans: spans}
+			continue
+		}
+		next, changed := decodeBase64TokensTracked(tt)
+		if !changed {
+			return tt
+		}
+		tt = next
+	}
+}
+
+func decodeBase64TokensTracked(tt trackedText) (trackedText, bool) {
+	matches := base64TokenRe.FindAllStringIndex(tt.text, -1)
+	if len(matches) == 0 {
+		return tt, false
+	}
+	var buf strings.Builder
+	buf.Grow(len(tt.text))
+	spans := make([]byteSpan, 0, len(tt.text))
+	prev := 0
+	changed := false
+	for _, m := range matches {
+		start, end := m[0], m[1]
+		if start > prev {
+			buf.WriteString(tt.text[prev:start])
+			spans = append(spans, tt.spans[prev:start]...)
+		}
+		if decoded, ok := tryBase64Token(tt.text[start:end]); ok {
+			tokSpan := mergeByteSpans(tt.spans[start:end])
+			buf.WriteString(decoded)
+			spans = appendRepeatedSpan(spans, tokSpan, len(decoded))
+			changed = true
+		} else {
+			buf.WriteString(tt.text[start:end])
+			spans = append(spans, tt.spans[start:end]...)
+		}
+		prev = end
+	}
+	if !changed {
+		return tt, false
+	}
+	if prev < len(tt.text) {
+		buf.WriteString(tt.text[prev:])
+		spans = append(spans, tt.spans[prev:]...)
+	}
+	return trackedText{text: buf.String(), spans: spans}, true
+}
+
+func applyNFKCTracked(tt trackedText) trackedText {
+	if utf8.ValidString(tt.text) && norm.NFKC.IsNormalString(tt.text) {
+		return tt
+	}
+	buf := make([]byte, 0, len(tt.text))
+	spans := make([]byteSpan, 0, len(tt.text))
+	for pos := 0; pos < len(tt.text); {
+		r, w := utf8.DecodeRuneInString(tt.text[pos:])
+		if r == utf8.RuneError && w == 1 {
+			const rep = "\ufffd"
+			buf = append(buf, rep...)
+			spans = appendRepeatedSpan(spans, tt.spans[pos], len(rep))
+			pos++
+			continue
+		}
+		next := norm.NFKC.NextBoundaryInString(tt.text[pos:], true)
+		if next <= 0 {
+			next = len(tt.text) - pos
+		}
+		// Keep valid prefix separate if an invalid UTF-8 byte falls before the next NFKC boundary.
+		seg := tt.text[pos : pos+next]
+		if !utf8.ValidString(seg) {
+			validEnd := 0
+			for validEnd < len(seg) {
+				sr, sw := utf8.DecodeRuneInString(seg[validEnd:])
+				if sr == utf8.RuneError && sw == 1 {
+					break
+				}
+				validEnd += sw
+			}
+			if validEnd > 0 {
+				next = validEnd
+				seg = seg[:validEnd]
+			}
+		}
+		normSeg := norm.NFKC.String(seg)
+		if seg == normSeg {
+			buf = append(buf, seg...)
+			spans = append(spans, tt.spans[pos:pos+next]...)
+		} else {
+			segSpan := mergeByteSpans(tt.spans[pos : pos+next])
+			buf = append(buf, normSeg...)
+			spans = appendRepeatedSpan(spans, segSpan, len(normSeg))
+		}
+		pos += next
+	}
+	return trackedText{text: string(buf), spans: spans}
+}
+
+func stripZeroWidthTracked(tt trackedText) trackedText {
+	var buf strings.Builder
+	buf.Grow(len(tt.text))
+	spans := make([]byteSpan, 0, len(tt.text))
+	for i, r := range tt.text {
+		_, w := utf8.DecodeRuneInString(tt.text[i:])
+		if zeroWidthSet[r] {
+			continue
+		}
+		buf.WriteString(tt.text[i : i+w])
+		spans = append(spans, tt.spans[i:i+w]...)
+	}
+	return trackedText{text: buf.String(), spans: spans}
+}
+
+func collapseWhitespaceTracked(tt trackedText) trackedText {
+	var buf strings.Builder
+	buf.Grow(len(tt.text))
+	spans := make([]byteSpan, 0, len(tt.text))
+	inSpace := false
+	spaceIdx := -1
+	for i, r := range tt.text {
+		w := utf8.RuneLen(r)
+		if r == utf8.RuneError {
+			_, w = utf8.DecodeRuneInString(tt.text[i:])
+		}
+		sp := mergeByteSpans(tt.spans[i : i+w])
+		if unicode.IsSpace(r) {
+			if !inSpace {
+				buf.WriteByte(' ')
+				spans = append(spans, sp)
+				spaceIdx = len(spans) - 1
+				inSpace = true
+			} else {
+				spans[spaceIdx] = mergeByteSpans([]byteSpan{spans[spaceIdx], sp})
+			}
+			continue
+		}
+		inSpace = false
+		buf.WriteString(tt.text[i : i+w])
+		spans = append(spans, tt.spans[i:i+w]...)
+	}
+	return trackedText{text: buf.String(), spans: spans}
+}
+
+func cleanLeetspeakTracked(tt trackedText) trackedText {
+	return mapRunesTracked(tt, func(r rune) rune {
+		if mapped, ok := leetspeakMap[r]; ok {
+			return mapped
+		}
+		return r
+	})
+}
+
+func toLowerTracked(tt trackedText) trackedText {
+	return mapRunesTracked(tt, unicode.ToLower)
+}
+
+func mapRunesTracked(tt trackedText, fn func(rune) rune) trackedText {
+	var buf strings.Builder
+	buf.Grow(len(tt.text))
+	spans := make([]byteSpan, 0, len(tt.text))
+	var tmp [utf8.UTFMax]byte
+	for i, r := range tt.text {
+		w := utf8.RuneLen(r)
+		if r == utf8.RuneError {
+			_, w = utf8.DecodeRuneInString(tt.text[i:])
+		}
+		mapped := fn(r)
+		if mapped == r {
+			buf.WriteString(tt.text[i : i+w])
+			spans = append(spans, tt.spans[i:i+w]...)
+			continue
+		}
+		n := utf8.EncodeRune(tmp[:], mapped)
+		buf.Write(tmp[:n])
+		sp := mergeByteSpans(tt.spans[i : i+w])
+		spans = appendRepeatedSpan(spans, sp, n)
+	}
+	return trackedText{text: buf.String(), spans: spans}
 }

@@ -6,6 +6,7 @@ package policy
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/acf-sdk/sidecar/pkg/riskcontext"
@@ -18,26 +19,31 @@ func ApplySanitise(targets []string, rc *riskcontext.RiskContext) []byte {
 	if len(targets) == 0 {
 		return nil
 	}
-	text := payloadText(rc)
+	field, text := payloadFieldAndText(rc)
 	if text == "" {
 		return nil
 	}
 
+	redactNeeded := false
+	splitNeeded := false
 	for _, target := range targets {
 		switch target {
 		case "prompt_text", "context_chunk", "memory_value", "tool_params", "tool_result":
-			// Redact the dangerous content from the payload. The scanner matches
-			// against CanonicalText, which normalise may have rewritten (URL/Base64
-			// decode, NFKC, leetspeak, zero-width strip). When that rewrite changed
-			// the text, CanonicalText is no longer a substring of the original
-			// payload and an exact-match redaction would silently do nothing — the
-			// chunk would come back with the attack intact despite a SANITISE
-			// decision. So we only redact the canonical span when it actually
-			// appears in the payload; otherwise we redact the whole value, which is
-			// the safe choice for content already flagged as dangerous.
-			//
-			// TODO(v2): once RiskContext carries the original matched spans from
-			// the scan stage, redact those directly and drop this fallback.
+			redactNeeded = true
+		case "split_chunk":
+			splitNeeded = true
+		}
+	}
+
+	// Redact matched spans before prepending split_chunk so original byte
+	// offsets in rc.MatchedSpans never shift regardless of target set order.
+	if redactNeeded {
+		if spans := spansForField(rc.MatchedSpans, field, len(text)); len(spans) > 0 {
+			text = redactSpans(text, spans)
+		} else {
+			// Fallback when no field-aligned spans are present (e.g. semantic-only
+			// signals, matches in another field such as on_memory.key, or direct
+			// ApplySanitise callers that did not run ScanStage).
 			seg := rc.CanonicalText
 			if seg != "" && strings.Contains(text, seg) {
 				text = Redact(SanitiseRequest{
@@ -47,37 +53,83 @@ func ApplySanitise(targets []string, rc *riskcontext.RiskContext) []byte {
 			} else {
 				text = "[REDACTED]"
 			}
-		case "split_chunk":
-			// Signal to the caller that the chunk must be split before processing.
-			text = InjectPrefix(SanitiseRequest{
-				Text:   text,
-				Prefix: "[ACF:SPLIT_REQUIRED]",
-			})
 		}
+	}
+
+	if splitNeeded {
+		text = InjectPrefix(SanitiseRequest{
+			Text:   text,
+			Prefix: "[ACF:SPLIT_REQUIRED]",
+		})
 	}
 
 	return encodePayload(rc, text)
 }
 
-// payloadText extracts a string representation from rc.Payload.
-// For string payloads, returns the string directly.
-// For map payloads, extracts common content fields.
-// Returns "" if the payload cannot be represented as text.
-func payloadText(rc *riskcontext.RiskContext) string {
+func spansForField(all []riskcontext.TextSpan, field string, limit int) []riskcontext.TextSpan {
+	var out []riskcontext.TextSpan
+	for _, sp := range all {
+		if sp.Field == field && sp.Start >= 0 && sp.Start < sp.End && sp.End <= limit {
+			out = append(out, sp)
+		}
+	}
+	if len(out) <= 1 {
+		return out
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Start != out[j].Start {
+			return out[i].Start < out[j].Start
+		}
+		return out[i].End < out[j].End
+	})
+	merged := out[:1]
+	for _, sp := range out[1:] {
+		last := &merged[len(merged)-1]
+		if sp.Start <= last.End {
+			if sp.End > last.End {
+				last.End = sp.End
+			}
+			continue
+		}
+		merged = append(merged, sp)
+	}
+	return merged
+}
+
+func redactSpans(text string, spans []riskcontext.TextSpan) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	pos := 0
+	for _, sp := range spans {
+		if sp.Start > pos {
+			b.WriteString(text[pos:sp.Start])
+		}
+		b.WriteString("[REDACTED]")
+		pos = sp.End
+	}
+	if pos < len(text) {
+		b.WriteString(text[pos:])
+	}
+	return b.String()
+}
+
+// payloadFieldAndText extracts the primary sanitisable field name and text from
+// rc.Payload. For string payloads, field is "".
+func payloadFieldAndText(rc *riskcontext.RiskContext) (string, string) {
 	switch v := rc.Payload.(type) {
 	case string:
-		return v
+		return "", v
 	case map[string]any:
 		for _, key := range []string{"content", "value", "text", "prompt", "result"} {
 			if s, ok := v[key].(string); ok {
-				return s
+				return key, s
 			}
 		}
 		// Fall back to full JSON for structured payloads.
 		b, _ := json.Marshal(v)
-		return string(b)
+		return "__json__", string(b)
 	default:
-		return ""
+		return "", ""
 	}
 }
 
