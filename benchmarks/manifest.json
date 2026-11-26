@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "frozen_at": "2026-10-10T22:01:07+01:00",
+  "frozen_at": "2026-11-26T11:15:00+05:30",
   "acf": {
     "repository": "https://github.com/c2siorg/agentic-cognitive-firewall",
-    "commit": "72677adbc54be73148780e8b3cafa7d161284167",
+    "commit": "76cf2f0a09de811f4e668201e6796c124b887d67",
     "artifacts": [
       {
         "path": "policies/v1/data/jailbreak_patterns.json",
@@ -11,7 +11,7 @@
       },
       {
         "path": "policies/v1/data/policy_config.yaml",
-        "sha256": "98d62350c80f1381055656a2b95928047f71f811d4d33d03027f15bb364c10d2"
+        "sha256": "98a36ee088dbbb048994bc9380066927a3d11418cc5ba131cdf1f11e46761c11"
       },
       {
         "path": "config/sidecar.yaml",
@@ -23,7 +23,7 @@
       },
       {
         "path": "sdk/python/acf/firewall.py",
-        "sha256": "5034b7abedae2c117c7abeb3b7d82f126cf49b02eb50378ae203bdd7f18e62eb"
+        "sha256": "94fe083dbe49d58c4d6e6e3d15fe6b9244952f11d1af5e48d95ddf610b72f7f5"
       }
     ],
     "pattern_provenance": {
