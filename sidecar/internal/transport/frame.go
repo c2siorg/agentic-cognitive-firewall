@@ -12,8 +12,8 @@
 // Response frame layout:
 //
 //	[0]      decision  — 0x00 ALLOW · 0x01 SANITISE · 0x02 BLOCK
-//	[1:5]    san_len   — uint32 big-endian (0 if not SANITISE)
-//	[5:]     sanitised — JSON bytes (SANITISE only)
+//	[1:5]    san_len   — uint32 big-endian (0 if empty)
+//	[5:]     payload   — JSON bytes (SANITISE: sanitised payload; BLOCK: BlockPayload)
 package transport
 
 import (

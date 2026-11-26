@@ -17,6 +17,9 @@ func init() {
 	// on_task declares a session's scope. It comes from the developer's code,
 	// not from content, hence its own provenance.
 	Register(Hook{Name: "on_task", Policy: "acf.policy.task", Provenance: "developer", Input: taskInput})
+	// on_confirm records values the user explicitly approved mid-session so
+	// subsequent tool calls may carry them without restarting the session.
+	Register(Hook{Name: "on_confirm", Policy: "acf.policy.confirm", Provenance: "developer", Input: confirmInput})
 	// on_tool_result screens a tool's output before the agent reads it, with
 	// the producing tool named so policy can tell sources apart.
 	Register(Hook{
@@ -55,6 +58,12 @@ func validateToolResult(payload any) error {
 func taskInput(rc *riskcontext.RiskContext, input map[string]any) {
 	if m, ok := payloadMap(rc); ok {
 		input["task"] = m
+	}
+}
+
+func confirmInput(rc *riskcontext.RiskContext, input map[string]any) {
+	if m, ok := payloadMap(rc); ok {
+		input["confirm"] = m
 	}
 }
 

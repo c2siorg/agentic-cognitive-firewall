@@ -12,7 +12,7 @@ import json
 import pytest
 
 from acf import Firewall, Session
-from acf.models import ChunkResult, Decision, FirewallError
+from acf.models import BlockInfo, ChunkResult, Decision, FirewallError
 
 HMAC_KEY = b"test-key-32-bytes-long-padded!!!"
 
@@ -120,4 +120,45 @@ def test_rejected_scope_raises(firewall):
 def test_scope_details_need_allowed_tools(firewall, extra):
     with pytest.raises(FirewallError, match="need allowed_tools"):
         firewall.session(**extra)
+    assert firewall.sent == []
+
+
+def test_session_last_block_and_confirm(firewall, monkeypatch):
+    block_body = (
+        b'{"hook":"on_tool_call","confirmable":true,"reasons":['
+        b'{"code":"argument_taint","tool":"send_money","param":"recipient","kind":"iban","value":"UK1234"}]}'
+    )
+    replies = iter([
+        {"decision": Decision.BLOCK.value, "sanitised_payload": block_body},
+        {"decision": Decision.ALLOW.value, "sanitised_payload": b""},
+        {"decision": Decision.ALLOW.value, "sanitised_payload": b""},
+    ])
+    sent = []
+
+    def fake_send(payload: bytes) -> dict:
+        sent.append(json.loads(payload))
+        return next(replies)
+
+    monkeypatch.setattr(firewall._transport, "send", fake_send)
+
+    s = firewall.session("s-confirm")
+    assert s.on_tool_call("send_money", {"recipient": "UK1234"}) == Decision.BLOCK
+    assert isinstance(s.last_block, BlockInfo)
+    assert s.last_block.confirmable is True
+    assert s.last_block.untrusted_values == ("UK1234",)
+
+    assert s.confirm(s.last_block.untrusted_values) == Decision.ALLOW
+    assert s.last_block is None
+    assert s.on_tool_call("send_money", {"recipient": "UK1234"}) == Decision.ALLOW
+    assert sent[1]["hook_type"] == "on_confirm"
+    assert sent[1]["provenance"] == "developer"
+    assert sent[1]["session_id"] == "s-confirm"
+    assert sent[1]["payload"] == {"values": ["UK1234"]}
+
+
+@pytest.mark.parametrize("bad", ["", [], [""], [123]])
+def test_confirm_rejects_invalid_values(firewall, bad):
+    s = firewall.session("s-bad-confirm")
+    with pytest.raises(FirewallError):
+        s.confirm(bad)  # type: ignore[arg-type]
     assert firewall.sent == []

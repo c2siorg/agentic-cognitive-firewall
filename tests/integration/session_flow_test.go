@@ -14,6 +14,9 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/acf-sdk/sidecar/internal/policy"
+	"github.com/acf-sdk/sidecar/internal/transport"
 )
 
 // sendIn fires one request in a session and returns the decision name.
@@ -96,5 +99,95 @@ func TestSessionFlow_ToolResultsInASession(t *testing.T) {
 	}
 	if got := sendIn(t, sid, "on_tool_result", injected, nil); got != "SANITISE" {
 		t.Errorf("injected tool result: got %s, want SANITISE", got)
+	}
+}
+
+func sendRaw(t *testing.T, session, hook string, payload any) *transport.ResponseFrame {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"score":      0.0,
+		"signals":    []map[string]any{},
+		"provenance": "sdk",
+		"session_id": session,
+		"hook_type":  hook,
+		"payload":    json.RawMessage(raw),
+		"state":      nil,
+	})
+	if err != nil {
+		t.Fatalf("marshal context: %v", err)
+	}
+	frame, err := transport.EncodeRequest(body, signer)
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	conn, err := dialSidecar(socketPath)
+	if err != nil {
+		t.Fatalf("dial sidecar: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+	resp, err := transport.DecodeResponse(conn)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return resp
+}
+
+func decodeBlock(t *testing.T, resp *transport.ResponseFrame) policy.BlockPayload {
+	t.Helper()
+	if got := decisionName(resp.Decision); got != "BLOCK" {
+		t.Fatalf("decision = %s, want BLOCK", got)
+	}
+	var bp policy.BlockPayload
+	if err := json.Unmarshal(resp.SanitisedPayload, &bp); err != nil {
+		t.Fatalf("unmarshal block payload (%q): %v", string(resp.SanitisedPayload), err)
+	}
+	return bp
+}
+
+func TestSessionFlow_WireBlockReasonsAndConfirmValidation(t *testing.T) {
+	sid := newSessionID("block-reasons")
+
+	// Scope to search only, then verify outside_task_scope carries structured reason.
+	if resp := sendRaw(t, sid, "on_task", map[string]any{"allowed_tools": []string{"search"}}); decisionName(resp.Decision) != "ALLOW" {
+		t.Fatalf("on_task failed: %s", decisionName(resp.Decision))
+	}
+	scopeBlock := decodeBlock(t, sendRaw(t, sid, "on_tool_call", map[string]any{"name": "calculator", "params": map[string]any{"expression": "1+1"}}))
+	if scopeBlock.Confirmable || len(scopeBlock.Reasons) != 1 || scopeBlock.Reasons[0].Code != "outside_task_scope" {
+		t.Errorf("unexpected scope block payload: %+v", scopeBlock)
+	}
+
+	// Read an untrusted IBAN and call send_money: both tool_not_allowed, outside_task_scope,
+	// and argument_taint appear together cleanly with confirmable=false.
+	const iban = "GB29NWBK60161331926819"
+	if resp := sendRaw(t, sid, "on_tool_result", map[string]any{"tool": "read_file", "result": "Pay " + iban}); decisionName(resp.Decision) != "ALLOW" {
+		t.Fatalf("on_tool_result unexpected: %s", decisionName(resp.Decision))
+	}
+	mixedBlock := decodeBlock(t, sendRaw(t, sid, "on_tool_call", map[string]any{"name": "send_money", "params": map[string]any{"recipient": iban}}))
+	if mixedBlock.Confirmable {
+		t.Errorf("mixed block must have confirmable=false, got %+v", mixedBlock)
+	}
+	codes := map[string]bool{}
+	for _, r := range mixedBlock.Reasons {
+		codes[r.Code] = true
+	}
+	if !codes["argument_taint"] || !codes["tool_not_allowed"] || !codes["outside_task_scope"] {
+		t.Errorf("expected argument_taint + allowlist + scope reasons, got %+v", mixedBlock.Reasons)
+	}
+
+	// Wire on_confirm succeeds on the active session, and rejects unknown sessions.
+	if resp := sendRaw(t, sid, "on_confirm", map[string]any{"values": []string{iban}}); decisionName(resp.Decision) != "ALLOW" {
+		t.Errorf("on_confirm on active session = %s, want ALLOW", decisionName(resp.Decision))
+	}
+	unknownBlock := decodeBlock(t, sendRaw(t, newSessionID("missing"), "on_confirm", map[string]any{"values": []string{iban}}))
+	if unknownBlock.Confirmable || len(unknownBlock.Reasons) != 1 || unknownBlock.Reasons[0].Code != "confirm:unknown_session" {
+		t.Errorf("unknown session confirm payload = %+v", unknownBlock)
 	}
 }

@@ -85,7 +85,7 @@ for you:
   largest number). All checks in a rule must hold. An argument the call does
   not pass is not checked; an empty `allowed` list permits nothing; a `pattern`
   or `max` applied to the wrong type fails closed.
-- `trusted_values` — values the developer vouches for, used by tainting.
+- `trusted_values` — values the developer vouches for at session start, used by tainting (and updated mid-session through `on_confirm`).
 
 Rules:
 
@@ -130,8 +130,20 @@ ways matches.
 |---|---|
 | `on_prompt` | trusted: the user's own request |
 | `on_task` `trusted_values` | trusted |
+| `on_confirm` `values` | trusted: explicitly approved mid-session by the user |
 | `on_context`, `on_tool_result` | untrusted, tagged with the hook and producing tool. SANITISE is recorded too, since over-tainting can only block more |
 | anything BLOCKed | nothing: the agent never saw blocked content, and values in a blocked request are never trusted |
+
+**Structured block reasons & mid-session confirmation.** When a request returns
+`BLOCK`, the response body carries structured JSON naming every failed gate
+(`block_reasons`, exposed as `session.last_block` / `session.lastBlock`). When
+an `on_tool_call` inside a session fails *only* because of `argument_taint`,
+`confirmable` is `true` and `untrusted_values` lists the flagged destinations
+alongside their sources (`hook`, `tool`). The host application can prompt the user
+out-of-band and approve specific values with `session.confirm([...])` (`on_confirm`,
+provenance `"developer"`) without restarting the session, then retry the call. Calls
+that also fail scope, constraint, allowlist, detection, or score rules report
+`confirmable: false`.
 
 A trusted value is never tainted. Each session tracks at most 4096 untrusted and
 2048 trusted values; past the untrusted cap, an argument value the session no
@@ -165,7 +177,8 @@ session:
 
 New signals, all in `signal_weights`: `validate:invalid_session_id`,
 `validate:invalid_payload`, `task:no_session`, `task:invalid_scope`,
-`task:already_declared` (each 1.0), and `taint:untrusted_argument` (0.0: it
+`task:already_declared`, `confirm:no_session`, `confirm:invalid_payload`,
+`confirm:unknown_session` (each 1.0), and `taint:untrusted_argument` (0.0: it
 records findings for the decision log; `tool.rego` decides from
 `input.state.taint`).
 

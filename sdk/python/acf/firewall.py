@@ -25,10 +25,12 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from .models import (
+    BlockInfo,
     ChunkResult,
     Decision,
     FirewallError,
     SanitiseResult,
+    parse_block_info,
 )
 from .transport import Transport, DEFAULT_SOCKET_PATH
 
@@ -117,6 +119,7 @@ class Firewall:
 
         self._semantic_scanner = None
         self._semantic_signal_threshold = None
+        self._last_block: BlockInfo | None = None
         if enable_semantic_scan:
             try:
                 from .scanners import SemanticScanner, SemanticScannerConfig
@@ -279,8 +282,22 @@ class Firewall:
                 decision.sanitised_text = wrapped["sanitised"]
         return decision
 
+    @property
+    def last_block(self) -> BlockInfo | None:
+        """Structured reason for the most recent BLOCK decision, or None."""
+        return self._last_block
+
     def _on_task(self, scope: dict[str, Any], *, session_id: str) -> Decision | SanitiseResult:
         payload = self._build_payload("on_task", scope, provenance="developer", session_id=session_id)
+        return self._send(payload)
+
+    def _on_confirm(self, values: list[str], *, session_id: str) -> Decision | SanitiseResult:
+        payload = self._build_payload(
+            "on_confirm",
+            {"values": list(values)},
+            provenance="developer",
+            session_id=session_id,
+        )
         return self._send(payload)
 
     def _on_prompt(self, text: str, *, session_id: str) -> Decision | SanitiseResult:
@@ -441,6 +458,7 @@ class Firewall:
         decision = Decision.from_byte(resp["decision"])
 
         if decision == Decision.SANITISE:
+            self._last_block = None
             raw  = resp["sanitised_payload"]
             text = raw.decode("utf-8", errors="replace") if raw else None
             return SanitiseResult(
@@ -448,4 +466,8 @@ class Firewall:
                 sanitised_payload=raw,
                 sanitised_text=text,
             )
+        if decision == Decision.BLOCK:
+            self._last_block = parse_block_info(resp.get("sanitised_payload", b""))
+        else:
+            self._last_block = None
         return decision

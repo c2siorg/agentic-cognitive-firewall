@@ -70,6 +70,70 @@ sanitise_targets contains "tool_params" if {
 # ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
+# Structured block reasons — one entry per failed gate or signal
+# ---------------------------------------------------------------------
+
+_tool_name := input.tool_name if {
+    is_string(input.tool_name)
+} else := ""
+
+block_reasons contains {"code": "tool_not_allowed", "tool": _tool_name} if {
+    not _tool_is_permitted
+}
+
+block_reasons contains {
+    "code": "destination_not_allowed",
+    "tool": _tool_name,
+    "detail": sprintf("%v", [input.tool_metadata.destination]),
+} if {
+    not _destination_is_permitted
+}
+
+block_reasons contains {"code": "outside_task_scope", "tool": _tool_name} if {
+    not _in_task_scope
+}
+
+block_reasons contains {
+    "code": "constraint_violation",
+    "tool": _tool_name,
+    "param": param,
+} if {
+    rules := input.state.task.tool_constraints[input.tool_name]
+    some param, rule in rules
+    not _param_ok(param, rule)
+}
+
+block_reasons contains {
+    "code": "argument_taint",
+    "tool": _tool_name,
+    "param": finding.param,
+    "kind": finding.kind,
+    "value": finding.value,
+    "sources": untrusted_sources,
+} if {
+    _is_consequential_tool
+    some finding in input.state.taint
+    _is_sensitive_param(finding.param)
+    untrusted_sources := [s | some s in finding.sources; _is_untrusted_source(s)]
+    count(untrusted_sources) > 0
+}
+
+block_reasons contains {
+    "code": "detection_signal",
+    "tool": _tool_name,
+    "signal": sig.category,
+} if {
+    some sig in input.signals
+    sig.category in {"parameter_injection", "shell_metacharacter", "path_traversal"}
+    sig.score >= 0.5
+}
+
+block_reasons contains {"code": "risk_threshold", "tool": _tool_name} if {
+    decision == "BLOCK"
+    input.score >= 0.8
+}
+
+# ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
 

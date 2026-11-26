@@ -37,6 +37,14 @@ type Result struct {
 	// SanitisedPayload is the transformed payload returned to the client when
 	// decision == Sanitise. Nil for Allow and Block decisions.
 	SanitisedPayload []byte
+	// BlockReasons lists the structured reasons when decision == Block.
+	BlockReasons []policy.BlockReason
+	// BlockConfirmable is true when decision == Block stems solely from
+	// confirmable argument taint inside an active session.
+	BlockConfirmable bool
+	// BlockPayload is the JSON-encoded BlockPayload embedded in the response
+	// frame when decision == Block.
+	BlockPayload []byte
 }
 
 // Trace records how long each step of one pipeline run took.
@@ -86,6 +94,12 @@ type Stage interface {
 // pipeline imports policy; policy imports only riskcontext — no cycle.
 type Evaluator interface {
 	Evaluate(rc *riskcontext.RiskContext) (decision string, sanitiseTargets []string, err error)
+}
+
+// ReasonEvaluator is optionally implemented by evaluators (such as *policy.Engine)
+// that return structured block reasons alongside the verdict.
+type ReasonEvaluator interface {
+	EvaluateDetailed(rc *riskcontext.RiskContext) (policy.OPAResult, error)
 }
 
 // Recorder sees each request after its decision, for example to update session
@@ -140,11 +154,15 @@ func (p *Pipeline) RunTraced(rc *riskcontext.RiskContext, tr *Trace) Result {
 		tr.stage(s, start)
 		if hardBlock {
 			if p.cfg.Pipeline.StrictMode {
+				reasons := stageBlockReasons(s.Name(), rc.Signals)
 				return Result{
-					Decision:  decision.Block,
-					Score:     rc.Score,
-					Signals:   rc.Signals,
-					BlockedAt: s.Name(),
+					Decision:         decision.Block,
+					Score:            rc.Score,
+					Signals:          rc.Signals,
+					BlockedAt:        s.Name(),
+					BlockReasons:     reasons,
+					BlockConfirmable: false,
+					BlockPayload:     policy.EncodeBlockPayload(rc.HookType, rc.SessionID, reasons),
 				}
 			}
 			// non-strict: note the stage but keep running
@@ -157,28 +175,56 @@ func (p *Pipeline) RunTraced(rc *riskcontext.RiskContext, tr *Trace) Result {
 	// After all stages: call OPA evaluator or fall back to threshold.
 	var d byte
 	var sanitised []byte
+	var blockReasons []policy.BlockReason
 
 	if p.evaluator != nil {
 		start := tr.now()
-		opaDecision, targets, err := p.evaluator.Evaluate(rc)
+		var res policy.OPAResult
+		var err error
+		if det, ok := p.evaluator.(ReasonEvaluator); ok {
+			res, err = det.EvaluateDetailed(rc)
+		} else {
+			var dec string
+			var targets []string
+			dec, targets, err = p.evaluator.Evaluate(rc)
+			res = policy.OPAResult{Decision: dec, SanitiseTargets: targets}
+		}
 		if tr != nil {
 			tr.Policy = clock.Since(start)
 		}
 		if err != nil {
 			log.Printf("pipeline: OPA evaluation error: %v (falling back to threshold)", err)
 			d = thresholdDecision(rc.Score, p.cfg.Thresholds)
+			if d == decision.Block {
+				blockReasons = []policy.BlockReason{{Code: "risk_threshold"}}
+			}
 		} else {
-			d = decisionByte(opaDecision)
-			if d == decision.Sanitise && len(targets) > 0 {
+			d = decisionByte(res.Decision)
+			if d == decision.Sanitise && len(res.SanitiseTargets) > 0 {
 				start := tr.now()
-				sanitised = policy.ApplySanitise(targets, rc)
+				sanitised = policy.ApplySanitise(res.SanitiseTargets, rc)
 				if tr != nil {
 					tr.Sanitise = clock.Since(start)
+				}
+			} else if d == decision.Block {
+				blockReasons = res.BlockReasons
+				if len(blockReasons) == 0 {
+					blockReasons = []policy.BlockReason{{Code: "policy_denied"}}
 				}
 			}
 		}
 	} else {
 		d = thresholdDecision(rc.Score, p.cfg.Thresholds)
+		if d == decision.Block {
+			blockReasons = []policy.BlockReason{{Code: "risk_threshold"}}
+		}
+	}
+
+	var blockPayload []byte
+	var confirmable bool
+	if d == decision.Block {
+		confirmable = policy.IsConfirmable(rc.HookType, rc.SessionID, blockReasons)
+		blockPayload = policy.EncodeBlockPayload(rc.HookType, rc.SessionID, blockReasons)
 	}
 
 	for _, r := range p.recorders {
@@ -191,7 +237,24 @@ func (p *Pipeline) RunTraced(rc *riskcontext.RiskContext, tr *Trace) Result {
 		Signals:          rc.Signals,
 		BlockedAt:        blockedAt,
 		SanitisedPayload: sanitised,
+		BlockReasons:     blockReasons,
+		BlockConfirmable: confirmable,
+		BlockPayload:     blockPayload,
 	}
+}
+
+func stageBlockReasons(stageName string, signals []riskcontext.Signal) []policy.BlockReason {
+	if len(signals) == 0 {
+		return []policy.BlockReason{{Code: "stage_blocked", Stage: stageName}}
+	}
+	reasons := make([]policy.BlockReason, 0, len(signals))
+	for _, sig := range signals {
+		reasons = append(reasons, policy.BlockReason{
+			Code:  sig.Category,
+			Stage: stageName,
+		})
+	}
+	return reasons
 }
 
 // decisionByte converts an OPA decision string to a decision byte constant.

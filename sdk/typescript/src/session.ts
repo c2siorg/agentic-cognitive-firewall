@@ -14,16 +14,31 @@
 import { randomBytes } from "node:crypto";
 
 import type { Firewall } from "./firewall";
-import { ChunkResult, Decision, decisionOf, FirewallError, HookResult, TaskScope } from "./models";
+import { BlockInfo, ChunkResult, Decision, decisionOf, FirewallError, HookResult, TaskScope } from "./models";
 
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 export class Session {
+  private _lastBlock: BlockInfo | null = null;
+
   private constructor(
     private readonly firewall: Firewall,
     readonly id: string,
     readonly scope: TaskScope | null,
-  ) {}
+    initialBlock: BlockInfo | null = null,
+  ) {
+    this._lastBlock = initialBlock;
+  }
+
+  /** Structured reason for the most recent BLOCK inside this session, or null. */
+  get lastBlock(): BlockInfo | null {
+    return this._lastBlock;
+  }
+
+  private finish<T>(result: T): T {
+    this._lastBlock = this.firewall.lastBlock;
+    return result;
+  }
 
   /** @internal Use `Firewall.session`. */
   static async open(firewall: Firewall, scope?: TaskScope, sessionId?: string): Promise<Session> {
@@ -46,26 +61,34 @@ export class Session {
           "allowed tool is in its global allowlist and the constraints are well formed",
       );
     }
-    return new Session(firewall, id, scope);
+    return new Session(firewall, id, scope, firewall.lastBlock);
   }
 
-  onPrompt(text: string): Promise<HookResult> {
-    return this.firewall.call("on_prompt", text, "user", this.id);
+  /** Approve values read during this session (on_confirm) after user confirmation. */
+  async confirm(values: string[]): Promise<HookResult> {
+    if (!Array.isArray(values) || values.length === 0 || values.some((v) => typeof v !== "string" || v.length === 0)) {
+      throw new FirewallError("confirm values must be a non-empty array of non-empty strings");
+    }
+    return this.finish(await this.firewall.call("on_confirm", { values: [...values] }, "developer", this.id));
   }
 
-  onContext(chunks: string[]): Promise<ChunkResult[]> {
-    return this.firewall.context(chunks, this.id);
+  async onPrompt(text: string): Promise<HookResult> {
+    return this.finish(await this.firewall.call("on_prompt", text, "user", this.id));
   }
 
-  onToolCall(name: string, params: Record<string, unknown>): Promise<HookResult> {
-    return this.firewall.call("on_tool_call", { name, params }, "agent", this.id);
+  async onContext(chunks: string[]): Promise<ChunkResult[]> {
+    return this.finish(await this.firewall.context(chunks, this.id));
   }
 
-  onToolResult(tool: string, result: unknown): Promise<HookResult> {
-    return this.firewall.toolResult(tool, result, this.id);
+  async onToolCall(name: string, params: Record<string, unknown>): Promise<HookResult> {
+    return this.finish(await this.firewall.call("on_tool_call", { name, params }, "agent", this.id));
   }
 
-  onMemory(key: string, value: string, op: "read" | "write" = "write"): Promise<HookResult> {
-    return this.firewall.call("on_memory", { key, value, op }, "agent", this.id);
+  async onToolResult(tool: string, result: unknown): Promise<HookResult> {
+    return this.finish(await this.firewall.toolResult(tool, result, this.id));
+  }
+
+  async onMemory(key: string, value: string, op: "read" | "write" = "write"): Promise<HookResult> {
+    return this.finish(await this.firewall.call("on_memory", { key, value, op }, "agent", this.id));
   }
 }

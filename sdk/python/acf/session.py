@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import re
 import secrets
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
-from .models import ChunkResult, Decision, FirewallError, SanitiseResult
+from .models import BlockInfo, ChunkResult, Decision, FirewallError, SanitiseResult
 
 if TYPE_CHECKING:
     from .firewall import Firewall
@@ -70,6 +70,7 @@ class Session:
         self._firewall = firewall
         self.id = sid
         self.scope: dict[str, Any] | None = None
+        self._last_block: BlockInfo | None = None
 
         if allowed_tools is None:
             if trusted_values is not None or tool_constraints is not None:
@@ -85,6 +86,7 @@ class Session:
         if tool_constraints is not None:
             scope["tool_constraints"] = tool_constraints
         result = firewall._on_task(scope, session_id=sid)
+        self._last_block = firewall.last_block
         decision = getattr(result, "decision", result)
         if decision is not Decision.ALLOW:
             # Fail loudly: an agent must never run believing it is scoped
@@ -95,6 +97,15 @@ class Session:
             )
         self.scope = scope
 
+    @property
+    def last_block(self) -> BlockInfo | None:
+        """Structured reason for the most recent BLOCK inside this session."""
+        return self._last_block
+
+    def _finish(self, result: Any) -> Any:
+        self._last_block = self._firewall.last_block
+        return result
+
     def __enter__(self) -> "Session":
         return self
 
@@ -104,22 +115,36 @@ class Session:
     def __repr__(self) -> str:
         return f"Session(id={self.id!r})"
 
+    def confirm(self, values: Iterable[str]) -> Decision | SanitiseResult:
+        """Approve specific values read during this session (on_confirm).
+
+        Typically called by the host application after ``on_tool_call`` returns
+        ``Decision.BLOCK`` with ``session.last_block.confirmable == True`` and
+        the user confirms ``session.last_block.untrusted_values``.
+        """
+        if isinstance(values, (str, bytes)):
+            raise FirewallError("confirm values must be an iterable of strings, not a bare string")
+        items = list(values)
+        if not items or any(not isinstance(v, str) or not v for v in items):
+            raise FirewallError("confirm values must be non-empty strings")
+        return self._finish(self._firewall._on_confirm(items, session_id=self.id))
+
     def on_prompt(self, text: str) -> Decision | SanitiseResult:
         """Evaluate a user prompt in this session. See Firewall.on_prompt."""
-        return self._firewall._on_prompt(text, session_id=self.id)
+        return self._finish(self._firewall._on_prompt(text, session_id=self.id))
 
     def on_context(self, chunks: list[str]) -> list[ChunkResult]:
         """Evaluate retrieved chunks in this session. See Firewall.on_context."""
-        return self._firewall._on_context(chunks, session_id=self.id)
+        return self._finish(self._firewall._on_context(chunks, session_id=self.id))
 
     def on_tool_call(self, name: str, params: dict[str, Any]) -> Decision | SanitiseResult:
         """Evaluate a tool call in this session. See Firewall.on_tool_call."""
-        return self._firewall._on_tool_call(name, params, session_id=self.id)
+        return self._finish(self._firewall._on_tool_call(name, params, session_id=self.id))
 
     def on_memory(self, key: str, value: str, op: str = "write") -> Decision | SanitiseResult:
         """Evaluate a memory read or write in this session. See Firewall.on_memory."""
-        return self._firewall._on_memory(key, value, op, session_id=self.id)
+        return self._finish(self._firewall._on_memory(key, value, op, session_id=self.id))
 
     def on_tool_result(self, tool: str, result: Any) -> Decision | SanitiseResult:
         """Evaluate a tool's output in this session. See Firewall.on_tool_result."""
-        return self._firewall._on_tool_result(tool, result, session_id=self.id)
+        return self._finish(self._firewall._on_tool_result(tool, result, session_id=self.id))

@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent
 if str(HERE.parent) not in sys.path:
@@ -38,23 +39,67 @@ def injection_visible(observation: str, goal_key: str) -> bool:
     return bool(goal_key) and goal_key in visible_key(observation)
 
 
+def normalized_confirm_matcher(confirmed_values: tuple[str, ...]) -> Callable[[Any], bool]:
+    """Build a reactive user-confirmation oracle matching canonicalised destinations.
+
+    Mirrors the sidecar's taint normalisation (lower-case, stripped whitespace for
+    IBANs/accounts/emails, and host extraction for URLs) so a task's legitimate
+    destinations can be confirmed mid-session when `last_block.confirmable` is
+    True, without pre-seeding `trusted_values` before execution.
+    """
+    allowed: set[str] = set()
+    for raw in confirmed_values:
+        text = str(raw).strip()
+        if not text:
+            continue
+        allowed.add(text)
+        allowed.add(text.lower())
+        compact = re.sub(r"\s+", "", text)
+        allowed.add(compact)
+        allowed.add(compact.lower())
+        digits = re.sub(r"[^0-9]+", "", text)
+        if len(digits) >= 8:
+            allowed.add(digits)
+        if "://" in text:
+            parsed = urlparse(text)
+            if parsed.hostname:
+                allowed.add(parsed.hostname.lower().removeprefix("www."))
+
+    def _matches(block_info: Any) -> bool:
+        values = getattr(block_info, "untrusted_values", ()) or ()
+        if not values:
+            return False
+        return all(
+            v in allowed or v.lower() in allowed or re.sub(r"\s+", "", v).lower() in allowed
+            for v in values
+        )
+
+    return _matches
+
+
 class Guard:
     """ACF for one case: a session, the arm's enforcement points, and a log.
 
     Every ACF arm runs in a session. A task-scoped arm declares the task's
     tools as the session's scope through the SDK (on_task), so the sidecar
     enforces least privilege itself rather than the harness imitating it.
-    The `none` arm makes no ACF calls at all. An arm with `confirm` also
-    declares confirmed_values as trusted, which the SDK only accepts together
-    with a task scope.
+    The `none` arm makes no ACF calls at all.
+
+    When `arm.confirm` is set without `confirm_callback`, confirmed_values are
+    declared upfront in `trusted_values` (pre-seeded upper bound). When
+    `confirm_callback` is provided, the session starts with no pre-seeded
+    trusted values and confirms confirmable taint blocks mid-session via
+    `session.confirm(...)` before retrying the blocked call once.
     """
 
     def __init__(self, firewall: Any, arm: harness.Arm, task_tools: tuple[str, ...],
-                 confirmed_values: tuple[str, ...] = ()) -> None:
+                 confirmed_values: tuple[str, ...] = (),
+                 confirm_callback: Callable[[Any], bool] | None = None) -> None:
         self.arm = arm
         self.session = None
+        self.confirm_callback = confirm_callback
         if firewall is not None and arm.name != "none":
-            if arm.gate == "task" and arm.confirm:
+            if arm.gate == "task" and arm.confirm and confirm_callback is None:
                 self.session = firewall.session(allowed_tools=sorted(set(task_tools)),
                                                 trusted_values=sorted(set(confirmed_values)))
             elif arm.gate == "task":
@@ -81,7 +126,19 @@ class Guard:
         entry: dict[str, Any] = {"tool": name, "legitimate": legitimate, "call": None, "result": None}
         self.calls.append(entry)
         if self.session is not None and self.arm.gate:
-            entry["call"] = harness.decision_of(self.session.on_tool_call(name, params)).name
+            verdict = harness.decision_of(self.session.on_tool_call(name, params)).name
+            if verdict == "BLOCK" and self.confirm_callback is not None:
+                block = getattr(self.session, "last_block", None)
+                if (
+                    block is not None
+                    and getattr(block, "confirmable", False)
+                    and getattr(block, "untrusted_values", ())
+                    and self.confirm_callback(block)
+                    and harness.decision_of(self.session.confirm(list(block.untrusted_values))).name == "ALLOW"
+                ):
+                    entry["confirmed"] = True
+                    verdict = harness.decision_of(self.session.on_tool_call(name, params)).name
+            entry["call"] = verdict
         return entry["call"] != "BLOCK"
 
     def screen_result(self, name: str, text: str) -> str:

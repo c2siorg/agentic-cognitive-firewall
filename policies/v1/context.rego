@@ -118,6 +118,21 @@ _max_chunk_bytes := data.config.max_chunk_bytes if {
 } else := 8192
 
 # ---------------------------------------------------------------------
+# Structured block reasons
+# ---------------------------------------------------------------------
+
+block_reasons contains {"code": "detection_signal", "signal": "structural_anomaly"} if {
+    _has_hard_block
+}
+
+block_reasons contains {"code": "risk_threshold"} if {
+    decision == "BLOCK"
+    _effective_score >= 0.8
+    not _has_hard_block
+    not _has_embedded_instruction
+}
+
+# ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
 

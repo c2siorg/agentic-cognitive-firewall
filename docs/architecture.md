@@ -35,6 +35,7 @@ Hooks self-register into a registry map. The pipeline only calls whatever is reg
 | `on_memory` | Before memory read/write | Memory poisoning — malicious values in persistent state |
 | `on_tool_result` | After a tool returns, before the agent reads it | Indirect injection through tool output, told apart by the producing tool |
 | `on_task` | A session starts | — declares the session's task scope (allowed tools, trusted values, argument constraints) |
+| `on_confirm` | User approves a flagged value mid-session | — promotes confirmed untrusted values in the active session without restarting |
 
 In the sidecar each hook is one entry in `sidecar/internal/hooks`, naming its
 Rego package, provenance, OPA input builder and optional payload validator.
@@ -165,8 +166,8 @@ The sidecar validates the 54-byte header before touching the JSON payload. An in
 | Field | Size | Description |
 |---|---|---|
 | Decision | 1 byte | `0x00` ALLOW · `0x01` SANITISE · `0x02` BLOCK |
-| Sanitised payload length | 4 bytes | 0 if decision is not SANITISE |
-| Sanitised payload | variable | Present only on SANITISE |
+| Payload length | 4 bytes | 0 if decision is ALLOW (or an unannotated BLOCK) |
+| Payload | variable | Present on SANITISE (sanitised payload JSON) and BLOCK (structured `BlockPayload` JSON) |
 
 ---
 

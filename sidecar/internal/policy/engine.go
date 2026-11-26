@@ -11,11 +11,14 @@ package policy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,12 +31,74 @@ import (
 	"github.com/acf-sdk/sidecar/pkg/riskcontext"
 )
 
+// TaintSource identifies where an untrusted value was read before reaching a
+// consequential tool argument.
+type TaintSource struct {
+	Hook string `json:"hook"`
+	Tool string `json:"tool,omitempty"`
+}
+
+// BlockReason describes a single policy gate or pipeline validation rule behind
+// a BLOCK verdict.
+type BlockReason struct {
+	Code    string        `json:"code"`
+	Stage   string        `json:"stage,omitempty"`
+	Tool    string        `json:"tool,omitempty"`
+	Param   string        `json:"param,omitempty"`
+	Kind    string        `json:"kind,omitempty"`
+	Value   string        `json:"value,omitempty"`
+	Sources []TaintSource `json:"sources,omitempty"`
+	Signal  string        `json:"signal,omitempty"`
+	Detail  string        `json:"detail,omitempty"`
+}
+
+// BlockPayload is the JSON document encoded into the response frame body when
+// Decision == Block.
+type BlockPayload struct {
+	Hook        string        `json:"hook,omitempty"`
+	Confirmable bool          `json:"confirmable"`
+	Reasons     []BlockReason `json:"reasons"`
+}
+
 // OPAResult is the structured output of a single OPA evaluation.
 type OPAResult struct {
 	// Decision is "ALLOW", "SANITISE", or "BLOCK".
 	Decision string
 	// SanitiseTargets lists the payload segments OPA wants transformed.
 	SanitiseTargets []string
+	// BlockReasons lists the structured reasons OPA produced when Decision == "BLOCK".
+	BlockReasons []BlockReason
+}
+
+// IsConfirmable reports whether a BLOCK verdict with reasons on hookType in
+// sessionID can be resolved mid-session via user confirmation (on_confirm).
+// Only session-scoped on_tool_call blocks caused exclusively by argument_taint
+// are confirmable; any other failed gate or signal keeps the block hard.
+func IsConfirmable(hookType, sessionID string, reasons []BlockReason) bool {
+	if hookType != "on_tool_call" || sessionID == "" || len(reasons) == 0 {
+		return false
+	}
+	for _, r := range reasons {
+		if r.Code != "argument_taint" {
+			return false
+		}
+	}
+	return true
+}
+
+// EncodeBlockPayload builds and JSON-marshals a deterministic BlockPayload.
+func EncodeBlockPayload(hookType, sessionID string, reasons []BlockReason) []byte {
+	out := append([]BlockReason(nil), reasons...)
+	if len(out) == 0 {
+		out = []BlockReason{{Code: "policy_denied"}}
+	}
+	payload := BlockPayload{
+		Hook:        hookType,
+		Confirmable: IsConfirmable(hookType, sessionID, out),
+		Reasons:     out,
+	}
+	b, _ := json.Marshal(payload)
+	return b
 }
 
 // preparedQueries holds one compiled query per registered hook, keyed by hook
@@ -74,20 +139,29 @@ func NewEngine(policyDir string) (*Engine, error) {
 //
 //	Evaluate(rc) (decision string, sanitiseTargets []string, err error)
 func (e *Engine) Evaluate(rc *riskcontext.RiskContext) (string, []string, error) {
+	res, err := e.EvaluateDetailed(rc)
+	if err != nil {
+		return "BLOCK", nil, err
+	}
+	return res.Decision, res.SanitiseTargets, nil
+}
+
+// EvaluateDetailed runs the OPA policy for rc.HookType and returns the full
+// OPAResult including structured block reasons.
+func (e *Engine) EvaluateDetailed(rc *riskcontext.RiskContext) (OPAResult, error) {
 	e.mu.RLock()
 	q, ok := e.queries[rc.HookType]
 	e.mu.RUnlock()
 	if !ok {
-		return "BLOCK", nil, fmt.Errorf("policy.Engine: unknown hook_type %q", rc.HookType)
+		return OPAResult{Decision: "BLOCK"}, fmt.Errorf("policy.Engine: unknown hook_type %q", rc.HookType)
 	}
 
 	rs, err := q.Eval(context.Background(), rego.EvalInput(buildInput(rc)))
 	if err != nil {
-		return "", nil, fmt.Errorf("policy.Engine: OPA evaluation error: %w", err)
+		return OPAResult{}, fmt.Errorf("policy.Engine: OPA evaluation error: %w", err)
 	}
 
-	result := extractResult(rs)
-	return result.Decision, result.SanitiseTargets, nil
+	return extractResult(rs), nil
 }
 
 // Stop shuts down the hot-reload goroutine.
@@ -339,5 +413,73 @@ func extractResult(rs rego.ResultSet) OPAResult {
 		}
 	}
 
-	return OPAResult{Decision: decision, SanitiseTargets: targets}
+	var reasons []BlockReason
+	if decision == "BLOCK" {
+		reasons = extractBlockReasons(obj["block_reasons"])
+	}
+
+	return OPAResult{Decision: decision, SanitiseTargets: targets, BlockReasons: reasons}
+}
+
+func extractBlockReasons(raw any) []BlockReason {
+	items, ok := raw.([]any)
+	if !ok || len(items) == 0 {
+		return nil
+	}
+	reasons := make([]BlockReason, 0, len(items))
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		code, _ := m["code"].(string)
+		if code == "" {
+			continue
+		}
+		r := BlockReason{
+			Code:   code,
+			Stage:  strField(m, "stage"),
+			Tool:   strField(m, "tool"),
+			Param:  strField(m, "param"),
+			Kind:   strField(m, "kind"),
+			Value:  strField(m, "value"),
+			Signal: strField(m, "signal"),
+			Detail: strField(m, "detail"),
+		}
+		if rawSources, ok := m["sources"].([]any); ok {
+			for _, rs := range rawSources {
+				sm, ok := rs.(map[string]any)
+				if !ok {
+					continue
+				}
+				hook := strField(sm, "hook")
+				if hook == "" {
+					continue
+				}
+				r.Sources = append(r.Sources, TaintSource{
+					Hook: hook,
+					Tool: strField(sm, "tool"),
+				})
+			}
+			sort.Slice(r.Sources, func(i, j int) bool {
+				if r.Sources[i].Hook != r.Sources[j].Hook {
+					return r.Sources[i].Hook < r.Sources[j].Hook
+				}
+				return r.Sources[i].Tool < r.Sources[j].Tool
+			})
+		}
+		reasons = append(reasons, r)
+	}
+	sort.Slice(reasons, func(i, j int) bool {
+		a, b := reasons[i], reasons[j]
+		keyA := strings.Join([]string{a.Code, a.Stage, a.Tool, a.Param, a.Kind, a.Value, a.Signal, a.Detail}, "\x00")
+		keyB := strings.Join([]string{b.Code, b.Stage, b.Tool, b.Param, b.Kind, b.Value, b.Signal, b.Detail}, "\x00")
+		return keyA < keyB
+	})
+	return reasons
+}
+
+func strField(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
 }
