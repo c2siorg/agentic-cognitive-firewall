@@ -14,12 +14,14 @@
 import { Session } from "./session";
 import { DEFAULT_SOCKET_PATH, Transport } from "./transport";
 import {
+  BlockInfo,
   ChunkResult,
   Decision,
   decisionFromByte,
   FirewallError,
   HookResult,
   isSanitised,
+  parseBlockInfo,
   SanitiseResult,
   TaskScope,
 } from "./models";
@@ -35,6 +37,12 @@ export interface FirewallOptions {
 
 export class Firewall {
   private readonly transport: Transport;
+  private _lastBlock: BlockInfo | null = null;
+
+  /** Structured reason for the most recent BLOCK decision, or null. */
+  get lastBlock(): BlockInfo | null {
+    return this._lastBlock;
+  }
 
   constructor(options: FirewallOptions = {}) {
     let key = options.hmacKey;
@@ -118,7 +126,11 @@ export class Firewall {
     };
     const response = await this.transport.send(Buffer.from(JSON.stringify(context), "utf8"));
     const decision = decisionFromByte(response.decision);
-    if (decision !== Decision.SANITISE) return decision;
+    if (decision !== Decision.SANITISE) {
+      this._lastBlock = decision === Decision.BLOCK ? parseBlockInfo(response.sanitisedPayload) : null;
+      return decision;
+    }
+    this._lastBlock = null;
     const result: SanitiseResult = {
       decision: Decision.SANITISE,
       sanitisedPayload: response.sanitisedPayload,

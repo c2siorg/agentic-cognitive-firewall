@@ -29,9 +29,9 @@ calling ``guard_tools`` needs it installed (``pip install langchain-core``).
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-from ..models import Decision, SanitiseResult
+from ..models import BlockInfo, Decision, SanitiseResult
 
 BLOCKED_CALL = "Blocked by policy: {tool} may not run with these arguments."
 WITHHELD_RESULT = "[The result of {tool} was withheld by policy.]"
@@ -47,7 +47,13 @@ def _require_langchain():
     return BaseTool
 
 
-def guard_tools(tools: Iterable[Any], guard: Any, *, raise_on_block: bool = False) -> list:
+def guard_tools(
+    tools: Iterable[Any],
+    guard: Any,
+    *,
+    raise_on_block: bool = False,
+    confirm: Callable[[BlockInfo], bool] | None = None,
+) -> list:
     """Wrap LangChain tools so their calls and results pass through ACF.
 
     Args:
@@ -57,13 +63,17 @@ def guard_tools(tools: Iterable[Any], guard: Any, *, raise_on_block: bool = Fals
             task scope and the provenance of argument values.
         raise_on_block: Raise ``FirewallBlocked`` instead of returning a
             refusal to the agent when a call is blocked.
+        confirm: Optional callback invoked when ``on_tool_call`` blocks solely on
+            confirmable argument taint (``block_info.confirmable``). Returning
+            ``True`` approves ``block_info.untrusted_values`` via ``guard.confirm``
+            and retries the tool call once.
 
     Returns:
         The wrapped tools, in the same order.
     """
     BaseTool = _require_langchain()
     wrapper = _guarded_tool_class(BaseTool)
-    return [wrapper.wrap(tool, guard, raise_on_block) for tool in tools]
+    return [wrapper.wrap(tool, guard, raise_on_block, confirm) for tool in tools]
 
 
 _GUARDED = None
@@ -83,9 +93,10 @@ def _guarded_tool_class(BaseTool):
         inner: Any = None
         guard: Any = None
         raise_on_block: bool = False
+        confirm: Any = None
 
         @classmethod
-        def wrap(cls, tool, guard, raise_on_block=False):
+        def wrap(cls, tool, guard, raise_on_block=False, confirm=None):
             return cls(
                 name=tool.name,
                 description=tool.description,
@@ -94,13 +105,31 @@ def _guarded_tool_class(BaseTool):
                 inner=tool,
                 guard=guard,
                 raise_on_block=raise_on_block,
+                confirm=confirm,
             )
 
         def _before(self, arguments: dict) -> str | None:
             """None if the call may run, otherwise the refusal for the agent."""
             if self.guard.on_tool_call(self.name, arguments) == Decision.BLOCK:
+                block_info = getattr(self.guard, "last_block", None)
+                if (
+                    self.confirm is not None
+                    and block_info is not None
+                    and block_info.confirmable
+                    and block_info.untrusted_values
+                    and callable(getattr(self.guard, "confirm", None))
+                    and self.confirm(block_info)
+                    and self.guard.confirm(list(block_info.untrusted_values)) == Decision.ALLOW
+                ):
+                    if self.guard.on_tool_call(self.name, arguments) != Decision.BLOCK:
+                        return None
+                    block_info = getattr(self.guard, "last_block", None)
                 if self.raise_on_block:
-                    raise FirewallBlocked(f"ACF blocked {self.name}", hook="on_tool_call")
+                    raise FirewallBlocked(
+                        f"ACF blocked {self.name}",
+                        hook="on_tool_call",
+                        block_info=block_info,
+                    )
                 return BLOCKED_CALL.format(tool=self.name)
             return None
 

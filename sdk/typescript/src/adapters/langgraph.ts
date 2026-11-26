@@ -31,7 +31,7 @@ export function firewallNode<State extends Record<string, unknown>>(
       if (!Array.isArray(value)) throw new TypeError(`${inputKey} must be a list of strings`);
       const results = await guard.onContext(value as string[]);
       if (results.some((r) => r.decision === Decision.BLOCK)) {
-        throw new FirewallBlocked(`firewall node blocked ${inputKey} at onContext`, "on_context");
+        throw new FirewallBlocked(`firewall node blocked ${inputKey} at onContext`, "on_context", guard.lastBlock);
       }
       return { [outputKey]: results.map((r) => r.sanitisedText ?? r.original) } as Partial<State>;
     }
@@ -40,7 +40,7 @@ export function firewallNode<State extends Record<string, unknown>>(
         ? await guard.onPrompt(String(value))
         : await guard.onToolResult(String((state as Record<string, unknown>).tool ?? "tool"), value);
     if (result === Decision.BLOCK) {
-      throw new FirewallBlocked(`firewall node blocked ${inputKey} at ${hook}`, hook);
+      throw new FirewallBlocked(`firewall node blocked ${inputKey} at ${hook}`, hook, guard.lastBlock);
     }
     if (isSanitised(result)) return { [outputKey]: result.sanitisedText } as Partial<State>;
     return {};

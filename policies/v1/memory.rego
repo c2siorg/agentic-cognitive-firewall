@@ -100,6 +100,20 @@ _exceeds_size_limit if {
 }
 
 # ---------------------------------------------------------------------
+# Structured block reasons
+# ---------------------------------------------------------------------
+
+block_reasons contains {"code": "hmac_invalid"} if {
+    input.memory_op == "read"
+    not input.integrity.hmac_valid == true
+}
+
+block_reasons contains {"code": "memory_size_limit"} if {
+    input.memory_op == "write"
+    _exceeds_size_limit
+}
+
+# ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
 

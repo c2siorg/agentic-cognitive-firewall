@@ -139,6 +139,7 @@ func TestDecodeResponse_All(t *testing.T) {
 	}{
 		{"allow", DecisionAllow, nil},
 		{"block", DecisionBlock, nil},
+		{"block with payload", DecisionBlock, []byte(`{"confirmable":true}`)},
 		{"sanitise", DecisionSanitise, []byte("safe content")},
 	}
 

@@ -105,9 +105,9 @@ def encode_response(decision: int, sanitised: bytes = b"") -> bytes:
     """Encode a response frame.
 
     decision: 0x00 ALLOW, 0x01 SANITISE, 0x02 BLOCK.
-    sanitised: only meaningful on SANITISE; ignored otherwise.
+    sanitised: optional JSON payload on SANITISE (sanitised text) or BLOCK (reasons).
     """
-    san_len = len(sanitised) if decision == 0x01 else 0
+    san_len = len(sanitised) if decision in (0x01, 0x02) else 0
     header  = struct.pack(_RESP_FMT, decision, san_len)
     return header + sanitised[:san_len]
 

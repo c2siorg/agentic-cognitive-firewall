@@ -13,12 +13,15 @@ Public API:
 """
 from .firewall import Firewall
 from .models import (
+    BlockInfo,
+    BlockReason,
     ChunkResult,
     Decision,
     FirewallBlocked,
     FirewallConnectionError,
     FirewallError,
     SanitiseResult,
+    TaintSource,
 )
 from .session import Session
 
@@ -27,6 +30,9 @@ __all__ = [
     "Session",
     "Decision",
     "SanitiseResult",
+    "BlockInfo",
+    "BlockReason",
+    "TaintSource",
     "ChunkResult",
     "FirewallBlocked",
     "FirewallError",

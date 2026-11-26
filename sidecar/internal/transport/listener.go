@@ -182,7 +182,11 @@ func (l *Listener) handleConn(conn net.Conn) {
 		var rc riskcontext.RiskContext
 		if err := json.Unmarshal(rf.Payload, &rc); err != nil {
 			log.Printf("transport: JSON unmarshal error: %v", err)
-			resp := EncodeResponse(&ResponseFrame{Decision: DecisionBlock})
+			body, _ := json.Marshal(map[string]any{
+				"confirmable": false,
+				"reasons":     []map[string]string{{"code": "validate:malformed_json", "stage": "transport"}},
+			})
+			resp := EncodeResponse(&ResponseFrame{Decision: DecisionBlock, SanitisedPayload: body})
 			conn.Write(resp) //nolint:errcheck
 			return
 		}
@@ -199,10 +203,14 @@ func (l *Listener) handleConn(conn net.Conn) {
 			rc.SessionID, rc.HookType, result.Score, result.Signals, decision, result.BlockedAt)
 		tm.Log = sw.lap()
 
-		// 5. Write response (include sanitised payload if decision == SANITISE).
+		// 5. Write response (include sanitised payload on SANITISE or block reasons on BLOCK).
+		body := result.SanitisedPayload
+		if decision == DecisionBlock {
+			body = result.BlockPayload
+		}
 		resp := EncodeResponse(&ResponseFrame{
 			Decision:         decision,
-			SanitisedPayload: result.SanitisedPayload,
+			SanitisedPayload: body,
 		})
 		if _, err := conn.Write(resp); err != nil {
 			log.Printf("transport: write error: %v", err)

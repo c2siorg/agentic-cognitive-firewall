@@ -10,7 +10,7 @@ const path = require("node:path");
 
 const {
   Firewall, Decision, FirewallError, FirewallConnectionError, isSanitised, guardTool, BLOCKED_CALL,
-  firewallNode, FirewallBlocked,
+  firewallNode, FirewallBlocked, parseBlockInfo,
 } = require("../dist/index.js");
 
 const KEY = crypto.randomBytes(32);
@@ -42,10 +42,11 @@ async function fakeSidecar(decide) {
       received.push(context);
       const [decision, text] = decide(context);
       const body = Buffer.from(text ?? "");
+      const hasBody = (decision === 1 || decision === 2) && body.length > 0;
       const header = Buffer.alloc(5);
       header.writeUInt8(decision, 0);
-      header.writeUInt32BE(decision === 1 ? body.length : 0, 1);
-      socket.end(Buffer.concat([header, decision === 1 ? body : Buffer.alloc(0)]));
+      header.writeUInt32BE(hasBody ? body.length : 0, 1);
+      socket.end(Buffer.concat([header, hasBody ? body : Buffer.alloc(0)]));
     });
   });
   const where = socketPath();
@@ -173,5 +174,68 @@ test("the key comes from ACF_HMAC_KEY as hex", () => {
   } finally {
     if (saved === undefined) delete process.env.ACF_HMAC_KEY;
     else process.env.ACF_HMAC_KEY = saved;
+  }
+});
+
+test("block reasons and mid-session confirm work end to end", async () => {
+  const trusted = new Set();
+  const sidecar = await fakeSidecar((ctx) => {
+    if (ctx.hook_type === "on_task" || ctx.hook_type === "on_prompt") return [0];
+    if (ctx.hook_type === "on_confirm") {
+      for (const v of ctx.payload.values ?? []) trusted.add(v);
+      return [0];
+    }
+    if (ctx.hook_type === "on_tool_call") {
+      if (ctx.payload.name === "forbidden_tool") {
+        return [2, JSON.stringify({
+          hook: "on_tool_call",
+          confirmable: false,
+          reasons: [{ code: "outside_task_scope", tool: "forbidden_tool" }],
+        })];
+      }
+      const recipient = ctx.payload.params.recipient;
+      if (!trusted.has(recipient)) {
+        return [2, JSON.stringify({
+          hook: "on_tool_call",
+          confirmable: true,
+          reasons: [{
+            code: "argument_taint",
+            tool: "send_money",
+            param: "recipient",
+            kind: "iban",
+            value: recipient,
+            sources: [{ hook: "on_tool_result", tool: "read_file" }],
+          }],
+        })];
+      }
+    }
+    return [0];
+  });
+  const fw = new Firewall({ socketPath: sidecar.where, hmacKey: KEY });
+  try {
+    const session = await fw.session({ allowedTools: ["send_money"] });
+    const asked = [];
+    const sendMoney = guardTool(session, "send_money", async (args) => `Sent:${args.recipient}`, {
+      confirm: (info) => {
+        asked.push(info.untrustedValues);
+        return info.untrustedValues.every((v) => v === "UK1234");
+      },
+    });
+    assert.equal(await sendMoney({ recipient: "UK1234" }), "Sent:UK1234");
+    assert.deepEqual(asked, [["UK1234"]]);
+    assert.equal(session.lastBlock, null);
+    assert.equal(await sendMoney({ recipient: "US9999" }), BLOCKED_CALL("send_money"));
+    assert.equal(session.lastBlock?.confirmable, true);
+    assert.deepEqual(session.lastBlock?.untrustedValues, ["US9999"]);
+
+    const forbidden = guardTool(session, "forbidden_tool", async () => "no", {
+      throwOnBlock: true,
+      confirm: () => true,
+    });
+    await assert.rejects(forbidden({}), (err) => err instanceof FirewallBlocked && err.blockInfo?.confirmable === false);
+    assert.equal(parseBlockInfo(Buffer.alloc(0)), null);
+    await assert.rejects(session.confirm([]), FirewallError);
+  } finally {
+    await sidecar.close();
   }
 });

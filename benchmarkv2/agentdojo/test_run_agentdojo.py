@@ -17,7 +17,7 @@ sys.modules[SPEC.name] = run_agentdojo
 SPEC.loader.exec_module(run_agentdojo)
 
 import acf_guard  # noqa: E402
-from acf.models import Decision, FirewallConnectionError  # noqa: E402
+from acf.models import BlockInfo, BlockReason, Decision, FirewallConnectionError  # noqa: E402
 from common import harness  # noqa: E402
 
 ARMS = run_agentdojo.ARMS
@@ -381,3 +381,74 @@ def test_confirm_arm_declares_the_confirmed_values_with_the_scope():
     acf_guard.Guard(firewall, ARMS["full-task-taint"], ("send_money",), ("a",))
     assert firewall.sessions[0].scope == {"allowed_tools": ["send_money"], "trusted_values": ["a", "b"]}
     assert firewall.sessions[1].scope == {"allowed_tools": ["send_money"]}
+
+
+def test_guard_reactive_mid_session_confirm_recovers_legitimate_call_without_preseeding():
+    class ReactiveSession:
+        def __init__(self, scope):
+            self.scope = scope
+            self.trusted: set[str] = set()
+            self.last_block: BlockInfo | None = None
+            self.calls: list[tuple] = []
+
+        def on_prompt(self, text: str):
+            return Decision.ALLOW
+
+        def on_tool_result(self, tool: str, result: str):
+            return Decision.ALLOW
+
+        def on_tool_call(self, name: str, params: dict):
+            self.calls.append((name, params))
+            recipient = str(params.get("recipient", ""))
+            if name == "send_money" and recipient not in self.trusted:
+                self.last_block = BlockInfo(
+                    hook="on_tool_call",
+                    confirmable=True,
+                    reasons=(BlockReason(
+                        code="argument_taint", tool="send_money", param="recipient",
+                        kind="iban", value=recipient,
+                    ),),
+                )
+                return Decision.BLOCK
+            self.last_block = None
+            return Decision.ALLOW
+
+        def confirm(self, values):
+            self.trusted.update(values)
+            self.last_block = None
+            return Decision.ALLOW
+
+    class ReactiveFirewall:
+        def __init__(self):
+            self.sessions = []
+
+        def session(self, **scope):
+            self.sessions.append(ReactiveSession(scope))
+            return self.sessions[-1]
+
+    fw = ReactiveFirewall()
+    matcher = acf_guard.normalized_confirm_matcher(("UK12 3456 7890", "https://Portal.Example.com/bill"))
+    guard = acf_guard.Guard(
+        fw,
+        ARMS["full-task-taint-confirm"],
+        ("read_file", "send_money"),
+        confirmed_values=("UK12 3456 7890",),
+        confirm_callback=matcher,
+    )
+    # Reactive mode must NOT pre-seed trusted_values into the initial task scope.
+    assert fw.sessions[0].scope == {"allowed_tools": ["read_file", "send_money"]}
+
+    assert guard.check_call("send_money", {"recipient": "UK1234567890"}, legitimate=True) is True
+    assert guard.calls[-1]["call"] == "ALLOW"
+    assert guard.calls[-1]["confirmed"] is True
+
+    # Attacker IBAN not in matcher remains blocked and never confirmed.
+    assert guard.check_call("send_money", {"recipient": "US133000000121212121212"}, legitimate=False) is False
+    assert guard.calls[-1]["call"] == "BLOCK"
+    assert "confirmed" not in guard.calls[-1]
+
+    # URL host extraction inside normalized_confirm_matcher works too.
+    assert matcher(BlockInfo(
+        hook="on_tool_call", confirmable=True,
+        reasons=(BlockReason(code="argument_taint", value="portal.example.com"),),
+    )) is True

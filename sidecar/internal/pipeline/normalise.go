@@ -58,6 +58,19 @@ func (n *NormaliseStage) Name() string { return "normalise" }
 // and writes the result to rc.CanonicalText. Always returns hardBlock=false.
 func (n *NormaliseStage) Run(rc *riskcontext.RiskContext) (hardBlock bool) {
 	raw := payloadText(rc.Payload)
+	if rc.HookType == "on_confirm" {
+		if m, ok := rc.Payload.(map[string]any); ok {
+			if vals, ok := m["values"].([]any); ok {
+				var parts []string
+				for _, v := range vals {
+					if s, ok := v.(string); ok {
+						parts = append(parts, s)
+					}
+				}
+				raw = strings.Join(parts, " ")
+			}
+		}
+	}
 	rc.CanonicalText = normalise(raw)
 	return false
 }

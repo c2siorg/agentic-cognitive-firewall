@@ -188,3 +188,66 @@ test_low_score_allowed_tool_allow if {
         with data.config.tool_allowlist as ["calculator"]
     result == "ALLOW"
 }
+
+test_block_reasons_argument_taint_filters_trusted_sources if {
+    reasons := tool.block_reasons with input as {
+        "tool_name": "send_money",
+        "score": 0.0,
+        "signals": [],
+        "provenance": "agent", "session_id": "s1", "hook_type": "on_tool_call",
+        "tool_metadata": {},
+        "tool_params": {"recipient": "UK1234"},
+        "state": {
+            "task": {"allowed_tools": ["send_money"]},
+            "taint": [{
+                "param": "recipient",
+                "kind": "iban",
+                "value": "UK1234",
+                "sources": [
+                    {"hook": "on_tool_result", "tool": "payments_api"},
+                    {"hook": "on_tool_result", "tool": "web_fetch"},
+                ],
+            }],
+        },
+    }
+        with data.config.tool_allowlist as ["send_money"]
+        with data.config.consequential_tools as ["send_money"]
+        with data.config.trusted_tools as ["payments_api"]
+    reasons == {{
+        "code": "argument_taint",
+        "tool": "send_money",
+        "param": "recipient",
+        "kind": "iban",
+        "value": "UK1234",
+        "sources": [{"hook": "on_tool_result", "tool": "web_fetch"}],
+    }}
+}
+
+test_block_reasons_multiple_failed_gates if {
+    reasons := tool.block_reasons with input as {
+        "tool_name": "send_money",
+        "score": 0.0,
+        "signals": [{"category": "shell_metacharacter", "score": 0.75}],
+        "provenance": "agent", "session_id": "s1", "hook_type": "on_tool_call",
+        "tool_metadata": {},
+        "tool_params": {"recipient": "UK1234", "amount": 500},
+        "state": {
+            "task": {
+                "allowed_tools": ["read_file"],
+                "tool_constraints": {"send_money": {"amount": {"max": 100}}},
+            },
+            "taint": [{
+                "param": "recipient",
+                "kind": "iban",
+                "value": "UK1234",
+                "sources": [{"hook": "on_context", "tool": ""}],
+            }],
+        },
+    }
+        with data.config.tool_allowlist as ["send_money"]
+        with data.config.consequential_tools as ["send_money"]
+    {"code": "outside_task_scope", "tool": "send_money"} in reasons
+    {"code": "constraint_violation", "tool": "send_money", "param": "amount"} in reasons
+    {"code": "detection_signal", "tool": "send_money", "signal": "shell_metacharacter"} in reasons
+    {"code": "argument_taint", "tool": "send_money", "param": "recipient", "kind": "iban", "value": "UK1234", "sources": [{"hook": "on_context", "tool": ""}]} in reasons
+}

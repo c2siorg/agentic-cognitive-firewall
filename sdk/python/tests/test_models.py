@@ -1,6 +1,17 @@
 """Tests for acf.models — Decision enum and result dataclasses."""
 import pytest
-from acf.models import Decision, SanitiseResult, ChunkResult, FirewallError, FirewallConnectionError
+from acf.models import (
+    BlockInfo,
+    BlockReason,
+    ChunkResult,
+    Decision,
+    FirewallBlocked,
+    FirewallConnectionError,
+    FirewallError,
+    SanitiseResult,
+    TaintSource,
+    parse_block_info,
+)
 
 
 def test_decision_members():
@@ -60,3 +71,36 @@ def test_firewall_error_is_exception():
 
 def test_firewall_connection_error_inherits():
     assert issubclass(FirewallConnectionError, FirewallError)
+
+
+def test_parse_block_info_extracts_reasons_and_untrusted_values():
+    raw = (
+        b'{"hook":"on_tool_call","confirmable":true,"reasons":['
+        b'{"code":"argument_taint","tool":"send_money","param":"recipient",'
+        b'"kind":"iban","value":"GB29NWBK60161331926819","sources":[{"hook":"on_tool_result","tool":"read_file"}]},'
+        b'{"code":"argument_taint","tool":"send_money","param":"recipient",'
+        b'"kind":"number","value":"60161331926819","sources":[{"hook":"on_tool_result","tool":"read_file"}]}]}'
+    )
+    info = parse_block_info(raw)
+    assert info is not None
+    assert info.hook == "on_tool_call"
+    assert info.confirmable is True
+    assert info.untrusted_values == ("GB29NWBK60161331926819",)
+    assert len(info.reasons) == 2
+    assert info.reasons[0] == BlockReason(
+        code="argument_taint",
+        tool="send_money",
+        param="recipient",
+        kind="iban",
+        value="GB29NWBK60161331926819",
+        sources=(TaintSource(hook="on_tool_result", tool="read_file"),),
+    )
+    assert parse_block_info(b"") is None
+    assert parse_block_info(b"not-json") is None
+
+
+def test_firewall_blocked_carries_block_info():
+    info = BlockInfo(hook="on_tool_call", confirmable=True)
+    exc = FirewallBlocked("blocked", hook="on_tool_call", block_info=info)
+    assert exc.hook == "on_tool_call"
+    assert exc.block_info is info

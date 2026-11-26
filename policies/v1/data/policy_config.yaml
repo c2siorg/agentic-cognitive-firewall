@@ -63,6 +63,11 @@ signal_weights:          # per-signal contribution to risk score
   task:invalid_scope: 1.0       # the declaration does not parse
   task:already_declared: 1.0    # a session's scope is set once
 
+  # mid-session confirmation declarations (emitted by the session stage on on_confirm)
+  confirm:no_session: 1.0       # confirmation must belong to a session
+  confirm:invalid_payload: 1.0  # the values list does not parse
+  confirm:unknown_session: 1.0  # confirmation requires an active session
+
   # argument tainting (emitted by the session stage on on_tool_call)
   taint:untrusted_argument: 0.0   # informational: tool.rego decides from input.state.taint,
                                   # so the signal adds no risk score of its own

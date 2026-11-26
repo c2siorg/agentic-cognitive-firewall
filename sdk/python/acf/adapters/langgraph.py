@@ -97,6 +97,7 @@ class FirewallNode:
             raise FirewallBlocked(
                 f"FirewallNode blocked input at hook {self._hook}",
                 hook=self._hook,
+                block_info=getattr(self._firewall, "last_block", None),
             )
 
         # Sanitised — swap the cleaned value back into state.

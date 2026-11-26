@@ -261,6 +261,29 @@ func TestEngine_FallbackOnUnknownHookType(t *testing.T) {
 	}
 }
 
+func TestEngine_EvaluateDetailed_BlockReasons(t *testing.T) {
+	eng := newTestEngine(t)
+	rc := &riskcontext.RiskContext{
+		HookType:   "on_tool_call",
+		Provenance: "agent",
+		Score:      0.0,
+		Payload: map[string]any{
+			"name":   "delete_everything",
+			"params": map[string]any{},
+		},
+	}
+	res, err := eng.EvaluateDetailed(rc)
+	if err != nil {
+		t.Fatalf("EvaluateDetailed: %v", err)
+	}
+	if res.Decision != "BLOCK" {
+		t.Fatalf("decision = %q, want BLOCK", res.Decision)
+	}
+	if len(res.BlockReasons) != 1 || res.BlockReasons[0].Code != "tool_not_allowed" || res.BlockReasons[0].Tool != "delete_everything" {
+		t.Errorf("unexpected block reasons: %+v", res.BlockReasons)
+	}
+}
+
 func TestEngine_Concurrency(t *testing.T) {
 	eng := newTestEngine(t)
 	rc := &riskcontext.RiskContext{

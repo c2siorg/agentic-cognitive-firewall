@@ -80,8 +80,44 @@ sanitise_targets contains "prompt_text" if {
 }
 
 # ---------------------------------------------------------------------
+# Structured block reasons
+# ---------------------------------------------------------------------
+
+block_reasons contains {"code": "detection_signal", "signal": sig.category} if {
+    some sig in input.signals
+    _hard_block_signal(sig)
+}
+
+block_reasons contains {"code": "risk_threshold"} if {
+    decision == "BLOCK"
+    input.score >= 0.8
+    not _has_hard_block
+}
+
+# ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
+
+_hard_block_signal(sig) if {
+    sig.category == "instruction_override"
+    sig.score >= 0.8
+}
+_hard_block_signal(sig) if {
+    sig.category == "role_escalation"
+    sig.score >= 0.8
+}
+_hard_block_signal(sig) if {
+    sig.category == "jailbreak_pattern"
+    sig.score >= 0.7
+}
+_hard_block_signal(sig) if {
+    sig.category == "obfuscation_escalation"
+    sig.score >= 0.8
+}
+_hard_block_signal(sig) if {
+    sig.category == "policy_integrity"
+    sig.score > 0.0
+}
 
 _has_hard_block if {
     some sig in input.signals

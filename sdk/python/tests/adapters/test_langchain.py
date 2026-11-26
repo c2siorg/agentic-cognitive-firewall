@@ -15,21 +15,31 @@ pytest.importorskip("langchain_core")
 from langchain_core.tools import tool  # noqa: E402
 
 from acf.adapters.langchain import BLOCKED_CALL, WITHHELD_RESULT, guard_tools  # noqa: E402
-from acf.models import Decision, FirewallBlocked, SanitiseResult  # noqa: E402
+from acf.models import BlockInfo, BlockReason, Decision, FirewallBlocked, SanitiseResult  # noqa: E402
 
 
 class FakeGuard:
-    def __init__(self, call=Decision.ALLOW, result=Decision.ALLOW):
+    def __init__(self, call=Decision.ALLOW, result=Decision.ALLOW, last_block=None):
         self.call, self.result = call, result
+        self.last_block = last_block
+        self.confirmed: list[list[str]] = []
         self.log: list[tuple] = []
 
     def on_tool_call(self, name, params):
         self.log.append(("call", name, params))
+        if callable(self.call):
+            return self.call(name, params, self)
         return self.call
 
     def on_tool_result(self, name, output):
         self.log.append(("result", name, output))
         return self.result
+
+    def confirm(self, values):
+        vals = list(values)
+        self.confirmed.append(vals)
+        self.log.append(("confirm", vals))
+        return Decision.ALLOW
 
 
 ran: list[dict] = []
@@ -102,4 +112,47 @@ def test_async_invocation_goes_through_the_same_checks():
     (guarded,) = guard_tools([send_money], guard)
     out = asyncio.run(guarded.ainvoke({"recipient": "US13", "amount": 5}))
     assert out == BLOCKED_CALL.format(tool="send_money")
+    assert ran == []
+
+
+def test_confirm_callback_retries_confirmable_taint_only():
+    confirmable = BlockInfo(
+        hook="on_tool_call",
+        confirmable=True,
+        reasons=(BlockReason(code="argument_taint", tool="send_money", param="recipient", kind="iban", value="UK12"),),
+    )
+
+    def scripted(name, params, g):
+        if params.get("recipient") in [v for batch in g.confirmed for v in batch]:
+            g.last_block = None
+            return Decision.ALLOW
+        g.last_block = confirmable
+        return Decision.BLOCK
+
+    guard = FakeGuard(call=scripted)
+    seen = []
+    (guarded,) = guard_tools(
+        [send_money],
+        guard,
+        confirm=lambda info: seen.append(info.untrusted_values) or info.untrusted_values == ("UK12",),
+    )
+    assert guarded.invoke({"recipient": "UK12", "amount": 5}) == "Sent 5.0 to UK12."
+    assert seen == [("UK12",)]
+    assert guard.confirmed == [["UK12"]]
+
+    # Non-confirmable blocks must never call confirm().
+    ran.clear()
+    seen.clear()
+    hard_block = BlockInfo(hook="on_tool_call", confirmable=False, reasons=(BlockReason(code="outside_task_scope"),))
+    hard_guard = FakeGuard(call=Decision.BLOCK, last_block=hard_block)
+    (hard_tool,) = guard_tools(
+        [send_money],
+        hard_guard,
+        raise_on_block=True,
+        confirm=lambda info: seen.append(info) or True,
+    )
+    with pytest.raises(FirewallBlocked) as exc_info:
+        hard_tool.invoke({"recipient": "UK12", "amount": 5})
+    assert exc_info.value.block_info == hard_block
+    assert seen == []
     assert ran == []

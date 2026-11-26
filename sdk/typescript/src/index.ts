@@ -11,13 +11,17 @@ export {
   decisionFromByte,
   decisionOf,
   isSanitised,
+  parseBlockInfo,
   FirewallError,
   FirewallConnectionError,
   FirewallBlocked,
   FrameError,
+  type BlockInfo,
+  type BlockReason,
   type ChunkResult,
   type HookResult,
   type SanitiseResult,
+  type TaintSource,
   type TaskScope,
 } from "./models";
 export { firewallNode, type NodeHook } from "./adapters/langgraph";

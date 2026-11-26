@@ -36,6 +36,15 @@ sanitise_targets contains "tool_result" if {
     input.score < 0.8
 }
 
+_tool_name := input.tool_name if {
+    is_string(input.tool_name)
+} else := ""
+
+block_reasons contains {"code": "risk_threshold", "tool": _tool_name} if {
+    not _trusted_tool
+    input.score >= 0.8
+}
+
 _trusted_tool if {
     input.tool_name in data.config.trusted_tools
 }

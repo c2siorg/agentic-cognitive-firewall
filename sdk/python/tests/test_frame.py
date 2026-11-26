@@ -123,6 +123,14 @@ def test_decode_response_block():
     assert result["sanitised_payload"] == b""
 
 
+def test_decode_response_block_with_reason_payload():
+    body   = b'{"confirmable":true,"reasons":[{"code":"argument_taint"}]}'
+    data   = encode_response(0x02, body)
+    result = decode_response(data)
+    assert result["decision"] == 0x02
+    assert result["sanitised_payload"] == body
+
+
 def test_decode_response_sanitise():
     body   = b"safe content"
     data   = encode_response(0x01, body)
